@@ -1,0 +1,5 @@
+[workspace]
+name = "STSS_"
+version = "0.1.0"
+edition = "2024"
+members = ["cli_client", "client_core", "server", "shared_library"]
