@@ -1,5 +1,5 @@
-//! Contains all the utils to interact with pem files from disk, for example, read them raw or
-//! create them.
+//! Useful to setup a simulated environment where client, server and CA can communicate between
+//! each other.
 
 use std::collections::HashSet;
 use std::convert::Into;
@@ -11,6 +11,7 @@ use std::{fmt, fs, io};
 use std::fmt::Formatter;
 use thiserror::Error;
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, PKCS_ED25519};
+use std::arch::is_aarch64_feature_detected;
 
 use server::config::{Config, KeysConfig, NetworkConfig, RuntimeConfig};
 
@@ -302,21 +303,27 @@ impl AnyServerFiles {
 
 pub fn heuristic_working_threads(thread_limits: Option<(usize, usize)>) -> (bool, usize) {
     /* heuristic to decide whether to include cryptographic threads or not. In general, for
-   systems that supports hardware acceleration, we decide not to include them since
-   cryptographical operations won't take long (and, so, a separated thread).
-   Otherwise, we reserve some threads for specific signing operations so that the server
-   will keep going with connections. */
+       systems that supports hardware acceleration, we decide not to include them since
+       cryptographical operations won't take long (and, so, a separated thread).
+       Otherwise, we reserve some threads for specific signing operations so that the server
+       will keep going with connections. */
+
+    /* for some unknown reasons, MacOS is the only operating system pretending to put std::arch::
+       as a prefix before every feature detection. Thank you MacOS for being the incredible,
+       beautiful operating system that you pretend to be but aren't. */
     #[cfg(target_arch = "x86_64")]
     /* both adx and bmi2 are instruction sets that deals well with big numbers operations, so
        we can say that RSA is handled well. */
     let is_crypto_hardware_accelerated =
-        is_x86_feature_detected!("adx") || is_x86_feature_detected!("bmi2");
+        std::arch::is_x86_feature_detected!("adx") ||
+        std::arch::is_x86_feature_detected!("bmi2");
 
     #[cfg(target_arch = "aarch64")]
     /* neon is quite always compatible with hardware acceleration. Otherwise, aes might
        be available too. */
     let is_crypto_hardware_accelerated =
-        is_aarch64_feature_detected!("neon") || is_aarch64_feature_detected!("aes");
+        std::arch::is_aarch64_feature_detected!("neon") ||
+        std::arch::is_aarch64_feature_detected!("aes");
 
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     /* fallback scenario for unsupported architectures. */
