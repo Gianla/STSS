@@ -1,5 +1,11 @@
 [workspace]
-name = "STSS_"
+members = ["cli_client", "client_core", "server", "shared_library", "terraform"]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
-edition = "2024"
-members = ["cli_client", "client_core", "server", "shared_library"]
+edition = "2021"
+
+# Option to optimize RSA heavy calculations in the server package.
+[profile.dev.package.num-bigint-dig]
+opt-level = 3

@@ -4,3 +4,5 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+rkyv = { version = "0.8.16", features = ["bytecheck"] }
+thiserror = "2.0.18"
