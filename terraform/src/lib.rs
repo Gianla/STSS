@@ -1,17 +1,16 @@
-//! Useful to setup a simulated environment where client, server and CA can communicate between
+//! Useful to set up a simulated environment where client, server and CA can communicate between
 //! each other.
 
-use std::collections::HashSet;
-use std::convert::Into;
 use const_format::concatcp;
+use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, PKCS_ED25519};
 use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
 use rsa::{RsaPrivateKey, RsaPublicKey};
-use std::path::{Component, Path, PathBuf, Prefix};
-use std::{fmt, fs, io};
+use std::collections::HashSet;
+use std::convert::Into;
 use std::fmt::Formatter;
+use std::path::{Component, Path, PathBuf};
+use std::{fmt, fs, io};
 use thiserror::Error;
-use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, PKCS_ED25519};
-use std::arch::is_aarch64_feature_detected;
 
 use server::config::{Config, KeysConfig, NetworkConfig, RuntimeConfig};
 
@@ -26,7 +25,7 @@ pub struct FileSystemName(String);
 #[derive(Error, Debug)]
 pub enum FileSystemNameError {
     #[error("{0:?} is not a valid file name")]
-    InvalidFileName(String)
+    InvalidFileName(String),
 }
 
 impl FileSystemName {
@@ -44,14 +43,14 @@ impl FileSystemName {
         let name_ref = name.as_ref();
         let path = Path::new(name_ref);
 
-        /* dismember the path into its components. */
+        // dismember the path into its components.
         let mut components = path.components();
 
-        /* this recursive struct can be dismantled into multiple cases: being correct while
-           borrowing other data, being correct while not borrowing other data, being incorrect.
-           The first element of this struct falls into the first case if it is a complex
-           directory path: we don't want that, so we return an error. We consider it to be correct
-           iff it is a simple component, that is, only a filename. */
+        // this recursive struct can be dismantled into multiple cases: being correct while
+        // borrowing other data, being correct while not borrowing other data, being incorrect.
+        // The first element of this struct falls into the first case if it is a complex
+        // directory path: we don't want that, so we return an error. We consider it to be correct
+        // iff it is a simple component, that is, only a filename.
         match (components.next(), components.next()) {
             (Some(Component::Normal(_)), None) => Ok(Self(name_ref.to_string())),
             _ => Err(FileSystemNameError::InvalidFileName(name_ref.to_string())),
@@ -71,21 +70,21 @@ impl FileSystemName {
     }
 }
 
-/* needed for join(). */
+// needed for join().
 impl AsRef<Path> for FileSystemName {
     fn as_ref(&self) -> &Path {
         Path::new(&self.0)
     }
 }
 
-/* needed for errors. */
+// needed for errors.
 impl fmt::Display for FileSystemName {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
 }
 
-/* implement try_from and try_into also for strings. */
+// implement try_from and try_into also for strings.
 impl TryFrom<&str> for FileSystemName {
     type Error = FileSystemNameError;
 
@@ -104,14 +103,14 @@ impl TryFrom<String> for FileSystemName {
 
 pub const DEFAULT_CLIENT_ENV_SUBDIR: &str = "client_env";
 pub const DEFAULT_SERVER_ENV_SUBDIR: &str = "server_env";
-pub const     DEFAULT_CA_ENV_SUBDIR: &str = "ca_env";
+pub const DEFAULT_CA_ENV_SUBDIR: &str = "ca_env";
 
 /// Groups the folders for the three actors.
 pub struct EnvironmentGenerator {
     client_dir: PathBuf,
     server_dir: PathBuf,
     ca_dir: PathBuf,
-    root_dir: PathBuf
+    root_dir: PathBuf,
 }
 
 impl EnvironmentGenerator {
@@ -123,7 +122,7 @@ impl EnvironmentGenerator {
         client_dir: PathBuf,
         server_dir: PathBuf,
         ca_dir: PathBuf,
-        root: PathBuf
+        root: PathBuf,
     ) -> Self {
         Self {
             client_dir,
@@ -154,14 +153,14 @@ pub struct EnvironmentGeneratorBuilder {
     client_dir: Option<FileSystemName>,
     server_dir: Option<FileSystemName>,
     ca_dir: Option<FileSystemName>,
-    root_dir: PathBuf
+    root_dir: PathBuf,
 }
 
 /// Errors that might arise while building an environment.
 #[derive(Error, Debug)]
 pub enum EnvironmentGeneratorBuildError {
     #[error("two or more given folders are equal: all of them should be different")]
-    FoldersMustBeDifferent
+    FoldersMustBeDifferent,
 }
 
 impl EnvironmentGeneratorBuilder {
@@ -171,50 +170,50 @@ impl EnvironmentGeneratorBuilder {
             client_dir: None,
             server_dir: None,
             ca_dir: None,
-            root_dir: root
+            root_dir: root,
         }
     }
 
     pub fn with_client_dir(&mut self, client_dir: FileSystemName) -> &mut Self {
-        self.client_dir = Some(client_dir.into());
+        self.client_dir = Some(client_dir);
         self
     }
 
     pub fn with_server_dir(&mut self, server_dir: FileSystemName) -> &mut Self {
-        self.server_dir = Some(server_dir.into());
+        self.server_dir = Some(server_dir);
         self
     }
 
     pub fn with_ca_dir(&mut self, ca_dir: FileSystemName) -> &mut Self {
-        self.ca_dir = Some(ca_dir.into());
+        self.ca_dir = Some(ca_dir);
         self
     }
 
     pub fn build(self) -> Result<EnvironmentGenerator, EnvironmentGeneratorBuildError> {
-        let client_path = self.root_dir.join(
-            self.client_dir.unwrap_or_else(||
-                FileSystemName::new(DEFAULT_CLIENT_ENV_SUBDIR).expect(concatcp!(
-                    "\"", DEFAULT_CLIENT_ENV_SUBDIR, "\" should be convertible into FileSystemName \
+        let client_path = self.root_dir.join(self.client_dir.unwrap_or_else(|| {
+            FileSystemName::new(DEFAULT_CLIENT_ENV_SUBDIR).expect(concatcp!(
+                "\"",
+                DEFAULT_CLIENT_ENV_SUBDIR,
+                "\" should be convertible into FileSystemName \
                     because it's const"
-                ))
-            )
-        );
-        let server_path = self.root_dir.join(
-            self.server_dir.unwrap_or_else(||
-                FileSystemName::new(DEFAULT_SERVER_ENV_SUBDIR).expect(concatcp!(
-                    "\"", DEFAULT_SERVER_ENV_SUBDIR, "\" should be convertible into FileSystemName \
+            ))
+        }));
+        let server_path = self.root_dir.join(self.server_dir.unwrap_or_else(|| {
+            FileSystemName::new(DEFAULT_SERVER_ENV_SUBDIR).expect(concatcp!(
+                "\"",
+                DEFAULT_SERVER_ENV_SUBDIR,
+                "\" should be convertible into FileSystemName \
                     because it's const"
-                ))
-            )
-        );
-        let ca_path = self.root_dir.join(
-            self.ca_dir.unwrap_or_else(||
-                FileSystemName::new(DEFAULT_CA_ENV_SUBDIR).expect(concatcp!(
-                    "\"", DEFAULT_CA_ENV_SUBDIR, "\" should be convertible into FileSystemName \
+            ))
+        }));
+        let ca_path = self.root_dir.join(self.ca_dir.unwrap_or_else(|| {
+            FileSystemName::new(DEFAULT_CA_ENV_SUBDIR).expect(concatcp!(
+                "\"",
+                DEFAULT_CA_ENV_SUBDIR,
+                "\" should be convertible into FileSystemName \
                     because it's const"
-                ))
-            )
-        );
+            ))
+        }));
 
         let mut seen = HashSet::new();
 
@@ -226,7 +225,12 @@ impl EnvironmentGeneratorBuilder {
             return Err(EnvironmentGeneratorBuildError::FoldersMustBeDifferent);
         }
 
-        Ok(EnvironmentGenerator::internal_new(client_path, server_path, ca_path, self.root_dir))
+        Ok(EnvironmentGenerator::internal_new(
+            client_path,
+            server_path,
+            ca_path,
+            self.root_dir,
+        ))
     }
 
     pub fn build_default(path: impl Into<PathBuf>) -> EnvironmentGenerator {
@@ -251,7 +255,7 @@ pub struct AnyServerFiles {
     toml_name: FileSystemName,
 
     /// Given prefix.
-    _given_prefix: FileSystemName
+    _given_prefix: FileSystemName,
 }
 
 impl AnyServerFiles {
@@ -261,7 +265,7 @@ impl AnyServerFiles {
         sign_pub_key_name: FileSystemName,
         sign_priv_key_name: FileSystemName,
         toml_name: FileSystemName,
-        _given_prefix: FileSystemName
+        _given_prefix: FileSystemName,
     ) -> Self {
         Self {
             tls_cert_name,
@@ -274,27 +278,31 @@ impl AnyServerFiles {
     }
 
     pub fn default(
-        prefix: impl TryInto<FileSystemName, Error = FileSystemNameError>
+        prefix: impl TryInto<FileSystemName, Error = FileSystemNameError>,
     ) -> Result<Self, FileSystemNameError> {
         let safe_prefix = prefix.try_into()?;
 
         let res = Self::internal_new(
-            safe_prefix.concat(&FileSystemName::new("tls_certificate.pem")
-                    .expect("this hardcoded value shouldn't fail")
+            safe_prefix.concat(
+                &FileSystemName::new("tls_certificate.pem")
+                    .expect("this hardcoded value shouldn't fail"),
             ),
-            safe_prefix.concat(&FileSystemName::new("tls_private_key.pem")
-                .expect("this hardcoded value shouldn't fail")
+            safe_prefix.concat(
+                &FileSystemName::new("tls_private_key.pem")
+                    .expect("this hardcoded value shouldn't fail"),
             ),
-            safe_prefix.concat(&FileSystemName::new("rsa_pub_key.pem")
-                .expect("this hardcoded value shouldn't fail")
+            safe_prefix.concat(
+                &FileSystemName::new("rsa_pub_key.pem")
+                    .expect("this hardcoded value shouldn't fail"),
             ),
-            safe_prefix.concat(&FileSystemName::new("rsa_priv_key.pem")
-                .expect("this hardcoded value shouldn't fail")
+            safe_prefix.concat(
+                &FileSystemName::new("rsa_priv_key.pem")
+                    .expect("this hardcoded value shouldn't fail"),
             ),
-            safe_prefix.concat(&FileSystemName::new("config.toml")
-                .expect("this hardcoded value shouldn't fail")
+            safe_prefix.concat(
+                &FileSystemName::new("config.toml").expect("this hardcoded value shouldn't fail"),
             ),
-            safe_prefix
+            safe_prefix,
         );
 
         Ok(res)
@@ -302,37 +310,36 @@ impl AnyServerFiles {
 }
 
 pub fn heuristic_working_threads(thread_limits: Option<(usize, usize)>) -> (bool, usize) {
-    /* heuristic to decide whether to include cryptographic threads or not. In general, for
-       systems that supports hardware acceleration, we decide not to include them since
-       cryptographical operations won't take long (and, so, a separated thread).
-       Otherwise, we reserve some threads for specific signing operations so that the server
-       will keep going with connections. */
+    // heuristic to decide whether to include cryptographic threads or not. In general, for
+    // systems that supports hardware acceleration, we decide not to include them since
+    // cryptographical operations won't take long (and, so, a separated thread).
+    // Otherwise, we reserve some threads for specific signing operations so that the server
+    // will keep going with connections.
 
-    /* for some unknown reasons, MacOS is the only operating system pretending to put std::arch::
-       as a prefix before every feature detection. Thank you MacOS for being the incredible,
-       beautiful operating system that you pretend to be but aren't. */
+    // for some unknown reasons, MacOS is the only operating system pretending to put std::arch::
+    // as a prefix before every feature detection. Thank you MacOS for being the incredible,
+    // beautiful operating system that you pretend to be but aren't.
     #[cfg(target_arch = "x86_64")]
-    /* both adx and bmi2 are instruction sets that deals well with big numbers operations, so
-       we can say that RSA is handled well. */
-    let is_crypto_hardware_accelerated =
-        std::arch::is_x86_feature_detected!("adx") ||
-        std::arch::is_x86_feature_detected!("bmi2");
+    // both adx and bmi2 are instruction sets that deals well with big numbers operations, so
+    // we can say that RSA is handled well.
+    let is_crypto_hardware_accelerated = !(!std::arch::is_x86_feature_detected!("adx")
+        && !std::arch::is_x86_feature_detected!("adx")
+        && !std::arch::is_x86_feature_detected!("bmi2"));
 
     #[cfg(target_arch = "aarch64")]
-    /* neon is quite always compatible with hardware acceleration. Otherwise, aes might
-       be available too. */
-    let is_crypto_hardware_accelerated =
-        std::arch::is_aarch64_feature_detected!("neon") ||
-        std::arch::is_aarch64_feature_detected!("aes");
+    // neon is quite always compatible with hardware acceleration. Otherwise, aes might
+    // be available too.
+    let is_crypto_hardware_accelerated = std::arch::is_aarch64_feature_detected!("neon")
+        || std::arch::is_aarch64_feature_detected!("aes");
 
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    /* fallback scenario for unsupported architectures. */
+    // fallback scenario for unsupported architectures.
     let is_crypto_hardware_accelerated = false;
 
-    /* heuristic to decide the number of threads to be used. We divide the available number
-       by 4, which should be more than enough for 4-threads architectures and more.
-       Furthermore, we establish a minimum of 16 in order to avoid syscall poisoning and
-       be ultra-safe regarding performance DoS. */
+    // heuristic to decide the number of threads to be used. We divide the available number
+    // by 4, which should be more than enough for 4-threads architectures and more.
+    // Furthermore, we establish a minimum of 16 in order to avoid syscall poisoning and
+    // be ultra-safe regarding performance DoS.
     const MIN_THREADS: usize = 2;
     const MAX_THREADS: usize = 16;
 
@@ -394,8 +401,10 @@ pub enum TomlGenError {
     #[error("error while writing the toml to file: {0:?}")]
     CannotWriteToFile(String),
 
-    #[error("incoherent thread limits: they should be strictly increasing while {0} and {1}, where \
-             {0} >= {1} has been given")]
+    #[error(
+        "incoherent thread limits: they should be strictly increasing while {0} and {1}, where \
+             {0} >= {1} has been given"
+    )]
     IncoherentThreadLimits(usize, usize),
 }
 
@@ -421,19 +430,23 @@ pub enum GeneratorCreationError {
 pub struct Generator {
     server_files: AnyServerFiles,
     ca_files: AnyServerFiles,
-    env: EnvironmentGenerator
+    env: EnvironmentGenerator,
 }
 
 impl Generator {
     pub fn new_from_files(
         server_files: AnyServerFiles,
         ca_files: AnyServerFiles,
-        env: EnvironmentGenerator
+        env: EnvironmentGenerator,
     ) -> Result<Self, GeneratorCreationError> {
         if server_files._given_prefix == ca_files._given_prefix {
-            return Err( GeneratorCreationError::EqualPrefixes )
+            return Err(GeneratorCreationError::EqualPrefixes);
         }
-        Ok (Self { server_files, ca_files, env })
+        Ok(Self {
+            server_files,
+            ca_files,
+            env,
+        })
     }
 
     pub fn generate_all(&self) -> Result<(), GenerationError> {
@@ -455,112 +468,133 @@ impl Generator {
     /// appropriate folders specified in the EnvironmentGenerator.
     fn generate_keys_and_distribute(&self) -> Result<(), KeyGenError> {
         let mut rng = rand::rng();
-        /* 1. CA's environment generation. */
+        // 1. CA's environment generation.
 
-        /* generate CA KeyPair for signing certificates. */
-        let ca_keypair = KeyPair::generate_for(&PKCS_ED25519).map_err(|e|
-            KeyGenError::Tls(e)
-        )?;
+        // generate CA KeyPair for signing certificates.
+        let ca_keypair = KeyPair::generate_for(&PKCS_ED25519).map_err(KeyGenError::Tls)?;
         let ca_key_pem = ca_keypair.serialize_pem();
 
-        /* create CA Certificate Params. */
-        let mut ca_params = CertificateParams::new(vec!["Root CA".to_string()]).map_err(|e|
-            KeyGenError::CACertificateCreation(e.to_string())
-        )?;
+        // create CA Certificate Params.
+        let mut ca_params = CertificateParams::new(vec!["Root CA".to_string()])
+            .map_err(|e| KeyGenError::CACertificateCreation(e.to_string()))?;
         ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        ca_params.distinguished_name.push(DnType::OrganizationName, "University of Pisa");
-        ca_params.distinguished_name.push(DnType::CommonName, "CyberSecurity Project");
+        ca_params
+            .distinguished_name
+            .push(DnType::OrganizationName, "University of Pisa");
+        ca_params
+            .distinguished_name
+            .push(DnType::CommonName, "CyberSecurity Project");
 
-        /* create the self-signed CA certificate. */
-        let ca_cert = ca_params.self_signed(&ca_keypair).map_err(|e|
-            KeyGenError::CACertificateCreation(e.to_string())
-        )?;
+        // create the self-signed CA certificate.
+        let ca_cert = ca_params
+            .self_signed(&ca_keypair)
+            .map_err(|e| KeyGenError::CACertificateCreation(e.to_string()))?;
         let ca_cert_pem = ca_cert.pem();
 
-        /* create the issuer: this is useful to already-sign the server. */
+        // create the issuer: this is useful to already-sign the server.
         let ca_issuer = rcgen::Issuer::new(ca_params, &ca_keypair);
 
-        /* 2. Server TLS generation. */
+        // 2. Server TLS generation.
 
-        /* Generate Server TLS KeyPair. */
-        let server_tls_keypair = KeyPair::generate_for(&PKCS_ED25519).map_err(|e|
-            KeyGenError::Tls(e)
-        )?;
+        // Generate Server TLS KeyPair.
+        let server_tls_keypair =
+            KeyPair::generate_for(&PKCS_ED25519).map_err(KeyGenError::Tls)?;
         let server_tls_key_pem = server_tls_keypair.serialize_pem();
 
-        /* create the server's Certificate Params. */
-        let mut server_tls_params = CertificateParams::new(vec!["localhost".to_string()]).map_err(|e|
-            KeyGenError::CACertificateCreation(e.to_string())
-        )?;
-        server_tls_params.distinguished_name.push(DnType::OrganizationName, "University of Pisa");
-        server_tls_params.distinguished_name.push(DnType::CommonName, "TSA Server");
+        // create the server's Certificate Params.
+        let mut server_tls_params = CertificateParams::new(vec!["localhost".to_string()])
+            .map_err(|e| KeyGenError::CACertificateCreation(e.to_string()))?;
+        server_tls_params
+            .distinguished_name
+            .push(DnType::OrganizationName, "University of Pisa");
+        server_tls_params
+            .distinguished_name
+            .push(DnType::CommonName, "TSA Server");
 
-        /* create the Server certificate and SIGN IT WITH THE CA. */
+        // create the Server certificate and SIGN IT WITH THE CA.
         let server_tls_cert = server_tls_params
             .signed_by(&server_tls_keypair, &ca_issuer)
-            .map_err(|e|
-                KeyGenError::ServerCertificateCreation(e.to_string())
-            )?;
+            .map_err(|e| KeyGenError::ServerCertificateCreation(e.to_string()))?;
         let server_tls_cert_pem = server_tls_cert.pem();
 
-        /* 3. Server TSA generation. */
+        // 3. Server TSA generation.
 
-        /* generate RSA keys for Timestamp Authority signing */
-        let server_rsa_priv = RsaPrivateKey::new(&mut rng, 2048).map_err(|e|
-            KeyGenError::Rsa(e)
-        )?;
+        // generate RSA keys for Timestamp Authority signing
+        let server_rsa_priv =
+            RsaPrivateKey::new(&mut rng, 2048).map_err(KeyGenError::Rsa)?;
         let server_rsa_pub = RsaPublicKey::from(&server_rsa_priv);
 
-        let server_rsa_priv_pem = server_rsa_priv.to_pkcs8_pem(LineEnding::LF).map_err(|e|
-            KeyGenError::RsaPkcs8(e)
-        )?;
-        let server_rsa_pub_pem = server_rsa_pub.to_public_key_pem(LineEnding::LF)
+        let server_rsa_priv_pem = server_rsa_priv
+            .to_pkcs8_pem(LineEnding::LF)
+            .map_err(KeyGenError::RsaPkcs8)?;
+        let server_rsa_pub_pem = server_rsa_pub
+            .to_public_key_pem(LineEnding::LF)
             .map_err(KeyGenError::from)?;
 
-        /* 4. File distribution. */
+        // 4. File distribution.
 
-        /* create the simulation directory. */
-        fs::create_dir(&self.env.root_dir).map_err(|e|
-            KeyGenError::Io(self.env.root_dir.to_string_lossy().to_string(), e)
-        )?;
+        // create the simulation directory.
+        fs::create_dir(&self.env.root_dir)
+            .map_err(|e| KeyGenError::Io(self.env.root_dir.to_string_lossy().to_string(), e))?;
 
-        /* ensure directories exist */
-        fs::create_dir(&self.env.ca_dir).map_err(|e|
-            KeyGenError::Io(self.env.ca_dir.to_string_lossy().to_string(), e)
-        )?;
-        fs::create_dir(&self.env.server_dir).map_err(|e|
-            KeyGenError::Io(self.env.server_dir.to_string_lossy().to_string(), e)
-        )?;
-        fs::create_dir(&self.env.client_dir).map_err(|e|
-            KeyGenError::Io(self.env.client_dir.to_string_lossy().to_string(), e)
-        )?;
+        // ensure directories exist.
+        fs::create_dir(&self.env.ca_dir)
+            .map_err(|e| KeyGenError::Io(self.env.ca_dir.to_string_lossy().to_string(), e))?;
+        fs::create_dir(&self.env.server_dir)
+            .map_err(|e| KeyGenError::Io(self.env.server_dir.to_string_lossy().to_string(), e))?;
+        fs::create_dir(&self.env.client_dir)
+            .map_err(|e| KeyGenError::Io(self.env.client_dir.to_string_lossy().to_string(), e))?;
 
-        /* helper closure to write strings to files cleanly. */
-        let write_file = |dir: &Path, filename: &FileSystemName, content: &str| -> Result<(), KeyGenError> {
-            let path = dir.join(filename);
-            fs::write(&path, content).map_err(|e|
-                KeyGenError::Io(path.to_string_lossy().to_string(), e)
-            )
-        };
+        // helper closure to write strings to files cleanly.
+        let write_file =
+            |dir: &Path, filename: &FileSystemName, content: &str| -> Result<(), KeyGenError> {
+                let path = dir.join(filename);
+                fs::write(&path, content)
+                    .map_err(|e| KeyGenError::Io(path.to_string_lossy().to_string(), e))
+            };
 
-        /* --- CA ENVIRONMENT --- */
+        // --- CA ENVIRONMENT ---
         // CA needs its own private key and its self-signed cert
         write_file(&self.env.ca_dir, &self.ca_files.tls_key_name, &ca_key_pem)?;
         write_file(&self.env.ca_dir, &self.ca_files.tls_cert_name, &ca_cert_pem)?;
 
-        /* --- SERVER ENVIRONMENT --- */
-        /* Server needs its TLS private key, its TLS cert (signed by CA), and its RSA private key.
-           Furthermore, if it needs to refresh its certificates, it needs the tls certificate
-           of the CA. */
-        write_file(&self.env.server_dir, &self.server_files.tls_key_name, &server_tls_key_pem)?;
-        write_file(&self.env.server_dir, &self.server_files.tls_cert_name, &server_tls_cert_pem)?;
-        write_file(&self.env.server_dir, &self.server_files.sign_priv_key_name, server_rsa_priv_pem.as_str())?;
-        write_file(&self.env.server_dir, &self.ca_files.tls_cert_name, &ca_cert_pem)?;
+        // --- SERVER ENVIRONMENT ---
+        // Server needs its TLS private key, its TLS cert (signed by CA), and its RSA private key.
+        // Furthermore, if it needs to refresh its certificates, it needs the tls certificate
+        // of the CA.
+        write_file(
+            &self.env.server_dir,
+            &self.server_files.tls_key_name,
+            &server_tls_key_pem,
+        )?;
+        write_file(
+            &self.env.server_dir,
+            &self.server_files.tls_cert_name,
+            &server_tls_cert_pem,
+        )?;
+        write_file(
+            &self.env.server_dir,
+            &self.server_files.sign_priv_key_name,
+            server_rsa_priv_pem.as_str(),
+        )?;
+        write_file(
+            &self.env.server_dir,
+            &self.ca_files.tls_cert_name,
+            &ca_cert_pem,
+        )?;
 
-        /* --- CLIENT ENVIRONMENT --- */
-        /* Client needs the CA cert (to verify TLS) and the Server RSA Pub Key (to verify Timestamps). */
-        write_file(&self.env.client_dir, &self.ca_files.tls_cert_name, &ca_cert_pem)?;
-        write_file(&self.env.client_dir, &self.server_files.sign_pub_key_name, server_rsa_pub_pem.as_str())?;
+        // --- CLIENT ENVIRONMENT ---
+        // Client needs the CA cert (to verify TLS) and the Server RSA Pub Key (to verify Timestamps).
+        write_file(
+            &self.env.client_dir,
+            &self.ca_files.tls_cert_name,
+            &ca_cert_pem,
+        )?;
+        write_file(
+            &self.env.client_dir,
+            &self.server_files.sign_pub_key_name,
+            server_rsa_pub_pem.as_str(),
+        )?;
 
         Ok(())
     }
@@ -571,9 +605,11 @@ impl Generator {
     /// edges anyway. If no limits are given, the result is clamped inside a reasonable amount of
     /// threads.
     fn generate_server_toml(
-        &self, thread_limits: Option<(usize, usize)>
+        &self,
+        thread_limits: Option<(usize, usize)>,
     ) -> Result<(), TomlGenError> {
-        let (is_crypto_hardware_accelerated, num_threads) = heuristic_working_threads(thread_limits);
+        let (is_crypto_hardware_accelerated, num_threads) =
+            heuristic_working_threads(thread_limits);
 
         let tls_cert_path = self.server_files.tls_cert_name.as_str();
         let tls_priv_path = self.server_files.tls_key_name.as_str();
@@ -581,20 +617,13 @@ impl Generator {
         let tss_priv_path = self.server_files.sign_priv_key_name.as_str();
 
         let default = Config::new(
-            NetworkConfig::new(
-                String::from("localhost"),
-                8080,
-            ),
+            NetworkConfig::new(String::from("localhost"), 8080),
             RuntimeConfig::new(
                 num_threads,
                 if is_crypto_hardware_accelerated { 0 } else { 1 },
             ),
-           KeysConfig::new(
-                tls_cert_path,
-                tls_priv_path,
-                tss_pub_path,
-                tss_priv_path,
-            ),
+            KeysConfig::new(tls_cert_path, tls_priv_path, tss_pub_path, tss_priv_path),
+            None,
         );
 
         let toml_default = toml::to_string_pretty(&default)
@@ -602,9 +631,8 @@ impl Generator {
 
         let final_path = self.env.server_dir.join(&self.server_files.toml_name);
 
-        fs::write(&final_path, toml_default).map_err(|e|
-            TomlGenError::Io(final_path.to_string_lossy().to_string(), e)
-        )
+        fs::write(&final_path, toml_default)
+            .map_err(|e| TomlGenError::Io(final_path.to_string_lossy().to_string(), e))
     }
 
     fn generate_ca_toml(&self) -> Result<(), TomlGenError> {

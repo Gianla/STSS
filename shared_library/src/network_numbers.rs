@@ -1,13 +1,13 @@
 //! Implements some utilities for big-endian to host conversion, strongly typing big-endian numbers
 //! to avoid confusion.
 
-use rkyv::Archive;
+use wincode::{SchemaWrite, SchemaRead};
 
 /// Macro to avoid error-prone and repetitive definitions.
 macro_rules! define_network_type {
     ($name:ident, $type:ty, $size:expr) => {
         /// Big-endian number that implements in/equality operations and de/serialization.
-        #[derive(Archive, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        #[derive(SchemaWrite, SchemaRead, Debug, Clone, Copy, PartialEq, Eq, Hash)]
         pub struct $name {
             n: [u8; $size],
         }
@@ -43,7 +43,6 @@ macro_rules! define_network_type {
 define_network_type!(NetworkShort, u16, 2);
 define_network_type!(NetworkLong, u32, 4);
 define_network_type!(NetworkLongLong, u64, 8);
-
 
 #[cfg(test)]
 mod tests {

@@ -4,9 +4,7 @@ use clap::Parser;
 use std::path::PathBuf;
 use std::process;
 
-use terraform::{
-    AnyServerFiles, EnvironmentGeneratorBuilder, Generator,
-};
+use terraform::{AnyServerFiles, EnvironmentGeneratorBuilder, Generator};
 
 /// CLI tool to bootstrap the TSA Project simulation environment
 #[derive(Parser, Debug)]
@@ -47,7 +45,9 @@ fn main() {
 
     if let Some(c) = cli.client_dir {
         match c.try_into() {
-            Ok(valid_name) => { env_builder.with_client_dir(valid_name); }
+            Ok(valid_name) => {
+                env_builder.with_client_dir(valid_name);
+            }
             Err(e) => {
                 eprintln!("Invalid client directory name provided: {}", e);
                 process::exit(1);
@@ -57,7 +57,9 @@ fn main() {
 
     if let Some(s) = cli.server_dir {
         match s.try_into() {
-            Ok(valid_name) => { env_builder.with_server_dir(valid_name); }
+            Ok(valid_name) => {
+                env_builder.with_server_dir(valid_name);
+            }
             Err(e) => {
                 eprintln!("Invalid server directory name provided: {}", e);
                 process::exit(1);
@@ -67,7 +69,9 @@ fn main() {
 
     if let Some(ca) = cli.ca_dir {
         match ca.try_into() {
-            Ok(valid_name) => { env_builder.with_ca_dir(valid_name); }
+            Ok(valid_name) => {
+                env_builder.with_ca_dir(valid_name);
+            }
             Err(e) => {
                 eprintln!("Invalid CA directory name provided: {}", e);
                 process::exit(1);

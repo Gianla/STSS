@@ -10,9 +10,18 @@ fn test_environments_are_always_under_root() {
     let root_path = PathBuf::from("/virtual/root/sim");
     let env = EnvironmentGeneratorBuilder::build_default(&root_path);
 
-    assert!(env.client_dir().starts_with(&root_path), "Client dir is not under root");
-    assert!(env.server_dir().starts_with(&root_path), "Server dir is not under root");
-    assert!(env.ca_dir().starts_with(&root_path), "CA dir is not under root");
+    assert!(
+        env.client_dir().starts_with(&root_path),
+        "Client dir is not under root"
+    );
+    assert!(
+        env.server_dir().starts_with(&root_path),
+        "Server dir is not under root"
+    );
+    assert!(
+        env.ca_dir().starts_with(&root_path),
+        "CA dir is not under root"
+    );
 }
 
 #[test]
@@ -20,15 +29,23 @@ fn test_builder_fails_on_duplicate_environments() {
     let root_path = PathBuf::from("sim_root");
     let mut builder = EnvironmentGeneratorBuilder::from_simulation_dir(root_path);
 
-    builder.with_client_dir("same_name".try_into()
-        .expect("this hardcoded value shouldn't fail")
+    builder.with_client_dir(
+        "same_name"
+            .try_into()
+            .expect("this hardcoded value shouldn't fail"),
     );
-    builder.with_server_dir("same_name".try_into()
-        .expect("this hardcoded value shouldn't fail"));
+    builder.with_server_dir(
+        "same_name"
+            .try_into()
+            .expect("this hardcoded value shouldn't fail"),
+    );
 
     let result = builder.build();
     assert!(
-        matches!(result, Err(EnvironmentGeneratorBuildError::FoldersMustBeDifferent)),
+        matches!(
+            result,
+            Err(EnvironmentGeneratorBuildError::FoldersMustBeDifferent)
+        ),
         "builder should've failed because of equal folders"
     );
 }
@@ -47,7 +64,10 @@ fn test_fails_if_root_directory_already_exists() {
     let generator = Generator::new_from_files(server_files, ca_files, env).unwrap();
     let result = generator.generate_all();
 
-    assert!(result.is_err(), "generator should've fail, directory already existed");
+    assert!(
+        result.is_err(),
+        "generator should've fail, directory already existed"
+    );
 
     if let Err(GenerationError::KeyGen(KeyGenError::Io(_, err))) = result {
         assert_eq!(

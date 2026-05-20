@@ -1,4 +1,4 @@
-mod server;
-mod user;
-mod connection_handler;
 pub mod config;
+mod connection_handler;
+mod server;
+mod database;
