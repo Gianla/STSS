@@ -1,0 +1,32 @@
+name: Lint CI (Clippy & Fmt)
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: Format & Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Code checkout
+        uses: actions/checkout@v4
+
+      - name: Rust toolchain Setup
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check Formatting
+        run: cargo fmt --all --check
+      # oppure rimuovilo se vuoi solo vedere i suggerimenti senza errori.
+      - name: Run Clippy (Linter)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
