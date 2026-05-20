@@ -2,7 +2,6 @@
 //! protocol of STSS.
 
 use std::fmt::{Display, Formatter};
-use std::future::Future;
 use std::io::{ErrorKind};
 use futures::{SinkExt, StreamExt};
 use rsa::RsaPrivateKey;
@@ -15,10 +14,9 @@ use tokio::net::TcpStream;
 use tokio_rustls::server::TlsStream;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
-use serde::Serialize;
-use wincode;
+use tracing::info;
 use shared_library::network_numbers::NetworkLongLong;
+
 use crate::database::{AddTokensError, AuthenticationError, GetTokensError, InternalDataBaseError, RegistrationError, ServerDataBase, SubtractTokensError};
 
 /// In order to access the state of the server by a lot of coroutines, we need to abstract it into
@@ -220,7 +218,7 @@ pub async fn conn_handler(
         };
 
         if let Some(session) = started_session  {
-            match session_handler(&session, &mut stream, &state) { _ => {} };
+            match session_handler(&session, &mut stream, state) { _ => {} };
         }
     }
 }
@@ -354,35 +352,26 @@ pub async fn session_handler(
             Request::SignHash(_) => {unreachable!()},
 
             Request::PurchaseTokens(be_tokens) => {
-                let unsafe_tokens = be_tokens.to_host();
+                let tokens = be_tokens.to_host();
 
-                match unsafe_tokens.try_into() {
-                    Ok(tokens) => {
-                        match database.add_user_tokens(&username, tokens).await {
-                            Ok(new_token_count) => {
-                                info!("{} updated their tokens: {}.", username, new_token_count);
-                                // In this case, we do not send a simple Ok to the client, but we
-                                // send a stronger confirmation that its tokens have been updated.
-                                Response::TokenCount(NetworkLongLong::from(new_token_count))
-                            }
-                            Err(token_add_error) => {
-                                match token_add_error {
-                                    AddTokensError::TokenOverflow => {
-                                        Response::TokenAmountTooHigh(be_tokens)
-                                    },
-                                    AddTokensError::UserDoesNotExist |
-                                    AddTokensError::InternalDataBase(_) => {
-                                        return Err(token_add_error.into())
-                                    }
-                                }
+                match database.add_user_tokens(&username, tokens).await {
+                    Ok(new_token_count) => {
+                        info!("{} updated their tokens: {}.", username, new_token_count);
+                        // In this case, we do not send a simple Ok to the client, but we
+                        // send a stronger confirmation that its tokens have been updated.
+                        Response::TokenCount(NetworkLongLong::from(new_token_count))
+                    }
+                    Err(token_add_error) => {
+                        match token_add_error {
+                            AddTokensError::TokenOverflow => {
+                                Response::TokenAmountTooHigh(be_tokens)
+                            },
+                            AddTokensError::UserDoesNotExist |
+                            AddTokensError::InternalDataBase(_) => {
+                                return Err(token_add_error.into())
                             }
                         }
-                    },
-                    Err(_) => {
-                        info!("User {} requested to purchase an extremely high amount ({}) of \
-                               tokens. Blocking the operation.", username, unsafe_tokens);
-                        Response::TokenAmountTooHigh(be_tokens)
-                    },
+                    }
                 }
             },
 

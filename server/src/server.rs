@@ -1,7 +1,5 @@
 //! Contains the main component for the server, with network and cryptography utilities.
 
-use std::ffi::{OsStr, OsString};
-use std::fs::File;
 use rsa::RsaPrivateKey;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::ServerConfig;
@@ -9,16 +7,10 @@ use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use dashmap::{DashMap, DashSet};
 use thiserror::Error;
 use time::OffsetDateTime;
 use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
-use tokio::{
-    signal::unix::{signal, SignalKind},
-    sync::watch,
-    time::sleep,
-};
 use tokio_rustls::TlsAcceptor;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tokio_util::sync::CancellationToken;
@@ -334,7 +326,10 @@ impl STSServer {
                        new_address);
 
                 // pass the correct, encrypted and framed stream to the main connection manager.
-                conn_handler(new_address, framed_stream, &state_clone).await;
+                match conn_handler(new_address, framed_stream, &state_clone).await {
+                    Ok(_) => {}
+                    Err(_) => {}
+                };
                 /*
                 match frame_error.kind() {
                     ErrorKind::InvalidData => {

@@ -4,7 +4,7 @@
 use std::{fs, io};
 use std::path::PathBuf;
 use sqlx::{FromRow, SqlitePool};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteQueryResult};
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use thiserror::Error;
 use futures::executor::block_on;
 use argon2::{password_hash::{PasswordHash, PasswordVerifier}, Argon2, PasswordHasher};
@@ -204,7 +204,7 @@ impl ServerDataBase {
         }
     }
 
-    pub async fn add_user_tokens(&self, username: &str, amount_u64: u64) -> Result<u64, AddTokensError> {
+    pub async fn add_user_tokens(&self, username: impl AsRef<str>, amount_u64: u64) -> Result<u64, AddTokensError> {
         let amount: i64 = amount_u64
             .try_into()
             .map_err(|_| AddTokensError::TokenOverflow)?;
@@ -214,7 +214,7 @@ impl ServerDataBase {
         let current_tokens: Option<i64> = sqlx::query_scalar(
             "SELECT available_tokens FROM users WHERE username = $1 FOR UPDATE"
         )
-            .bind(username)
+            .bind(username.as_ref())
             .fetch_optional(&mut *tx)
             .await?;
 
@@ -231,7 +231,7 @@ impl ServerDataBase {
             "UPDATE users SET available_tokens = available_tokens + $1 WHERE username = $2"
         )
             .bind(amount)
-            .bind(username)
+            .bind(username.as_ref())
             .execute(&mut *tx)
             .await?;
 
@@ -428,7 +428,7 @@ impl ServerDataBaseBuilder {
 
         while let Some(row) = rows_stream.try_next().await? {
             if !row.is_valid {
-                DataBaseBuildError::ConstraintViolation(row.username);
+                return Err(DataBaseBuildError::ConstraintViolation(row.username));
             }
         }
 
