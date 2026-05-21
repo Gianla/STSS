@@ -17,8 +17,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 use tracing_appender::non_blocking::WorkerGuard;
 
-use crate::connection_handler::STSServerState;
 use crate::connection_handler::conn_handler;
+use crate::connection_handler::STSServerState;
 use crate::database::{DataBaseBuildError, DataBaseLocation, ServerDataBaseBuilder};
 
 /// Returns the current time in nanoseconds.
@@ -30,7 +30,7 @@ pub fn time_now() -> i128 {
 /// Where to write logs. For the moment, we support stdout and a filepath.
 pub enum LogDestination {
     Stdout,
-    File { dir: PathBuf, filename: PathBuf }
+    File { dir: PathBuf, filename: PathBuf },
 }
 
 /// The Config structure is useful only for unprocessed configuration's data. For example,
@@ -105,11 +105,13 @@ pub enum STSServerBuildError {
     #[error("error while setting up the TLS logic for the server: {0}")]
     TLSSetup(String),
 
-    #[error("error with the logger: {0}; likely, the logger was already built (and so the server)")]
+    #[error(
+        "error with the logger: {0}; likely, the logger was already built (and so the server)"
+    )]
     Logger(String),
 
     #[error(transparent)]
-    DataBase(#[from] DataBaseBuildError)
+    DataBase(#[from] DataBaseBuildError),
 }
 
 /// Errors that might arise while running the server.
@@ -178,8 +180,9 @@ impl STSServer {
 
                 let msg = match full_path.to_str() {
                     Some(utf8_path) => format!("Logger initialized to file: {}", utf8_path),
-                    None =>
-                        "Logger initialized to the specified file (non-UTF-8 path).".to_string(),
+                    None => {
+                        "Logger initialized to the specified file (non-UTF-8 path).".to_string()
+                    }
                 };
 
                 (writer, guard, msg)
@@ -228,7 +231,7 @@ impl STSServer {
             address,
             state,
             tls_acceptor,
-            _log_guard
+            _log_guard,
         })
     }
 
@@ -256,19 +259,20 @@ impl STSServer {
         let listener = TcpListener::bind(self.address)
             .await
             .map_err(|e| match e.kind() {
-                ErrorKind::AddrInUse => {
-                    STSServerRunError::PortAlreadyInUse(self.address.port())
-                }
+                ErrorKind::AddrInUse => STSServerRunError::PortAlreadyInUse(self.address.port()),
                 ErrorKind::PermissionDenied => {
                     STSServerRunError::PermissionDenied(self.address.port())
                 }
-                ErrorKind::AddrNotAvailable => {
-                    STSServerRunError::AddrNotAvailable(self.address)
-                }
+
+                ErrorKind::AddrNotAvailable => STSServerRunError::AddrNotAvailable(self.address),
+
                 _ => STSServerRunError::GenericBind(e.to_string()),
             })?;
 
-        info!("Address {} bounded, listening for incoming connections.", self.address);
+        info!(
+            "Address {} bounded, listening for incoming connections.",
+            self.address
+        );
         let mut _unanswered_syn_count: u64 = 0;
 
         loop {
@@ -286,8 +290,8 @@ impl STSServer {
                             // maybe this variable can be used in some network management
                             // operation, but it's not our priority right now.
                             let _ = _unanswered_syn_count.checked_add(1);
-                            continue
-                        },
+                            continue;
+                        }
                         _ => continue,
                     }
                 }
@@ -307,12 +311,17 @@ impl STSServer {
                 // wrapping the newbie stream into a tls_stream will perform the TLS handshake.
                 // The TLS acceptor is interpreted as the server-side of the handshake, where we
                 // loaded certificates and configurations before.
-                let tls_stream = tls_acceptor_clone.accept(stream)
-                    .await
-                    .inspect_err(|tls_error| {
-                        info!("Address {} performed a wrong TLS handshake: {}.",
-                              new_address, tls_error.to_string())
-                    })?;
+                let tls_stream =
+                    tls_acceptor_clone
+                        .accept(stream)
+                        .await
+                        .inspect_err(|tls_error| {
+                            info!(
+                                "Address {} performed a wrong TLS handshake: {}.",
+                                new_address,
+                                tls_error.to_string()
+                            )
+                        })?;
 
                 // if the TLS handshake was successful, we further wrap the tls stream into a framed
                 // stream. A framed stream is an abstraction of a stream, where the first n bytes
@@ -322,8 +331,10 @@ impl STSServer {
                 let codec = LengthDelimitedCodec::new();
                 let framed_stream = Framed::new(tls_stream, codec);
 
-                info!("Address {} connected and performed the TLS handshake. Waiting for commands.",
-                       new_address);
+                info!(
+                    "Address {} connected and performed the TLS handshake. Waiting for commands.",
+                    new_address
+                );
 
                 // pass the correct, encrypted and framed stream to the main connection manager.
                 match conn_handler(new_address, framed_stream, &state_clone).await {
@@ -346,7 +357,7 @@ impl STSServer {
                 */
 
                 // tokio cannot infer types properly, so we must help it with a turbofish operator.
-                Ok::<(), std::io::Error>( () )
+                Ok::<(), std::io::Error>(())
             });
         }
         debug!("Outside of server's loop, stopping the internal run.");

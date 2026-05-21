@@ -3,8 +3,8 @@
 
 pub mod config;
 pub mod connection_handler;
-pub mod server;
 pub mod database;
+pub mod server;
 
 use server::{KeyContext, RuntimeContext, STSServer, ServerContext};
 use std::net::{IpAddr, SocketAddr};
@@ -12,7 +12,6 @@ use std::str::FromStr;
 use tracing::Level;
 
 fn main() {
-
     let ip = IpAddr::from_str("localhost").unwrap();
     // let context = ServerContext::new(
     // SocketAddr::new(ip, 50000),

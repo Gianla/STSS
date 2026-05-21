@@ -497,8 +497,7 @@ impl Generator {
         // 2. Server TLS generation.
 
         // Generate Server TLS KeyPair.
-        let server_tls_keypair =
-            KeyPair::generate_for(&PKCS_ED25519).map_err(KeyGenError::Tls)?;
+        let server_tls_keypair = KeyPair::generate_for(&PKCS_ED25519).map_err(KeyGenError::Tls)?;
         let server_tls_key_pem = server_tls_keypair.serialize_pem();
 
         // create the server's Certificate Params.
@@ -520,8 +519,7 @@ impl Generator {
         // 3. Server TSA generation.
 
         // generate RSA keys for Timestamp Authority signing
-        let server_rsa_priv =
-            RsaPrivateKey::new(&mut rng, 2048).map_err(KeyGenError::Rsa)?;
+        let server_rsa_priv = RsaPrivateKey::new(&mut rng, 2048).map_err(KeyGenError::Rsa)?;
         let server_rsa_pub = RsaPublicKey::from(&server_rsa_priv);
 
         let server_rsa_priv_pem = server_rsa_priv

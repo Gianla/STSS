@@ -1,5 +1,5 @@
 [workspace]
-members = ["cli_client", "client_core", "server", "shared_library", "terraform"]
+members = ["client_cli", "client_core", "server", "shared_library", "terraform"]
 resolver = "3"
 
 [workspace.package]

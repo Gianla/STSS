@@ -22,6 +22,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2.5"
 argon2 = { version = "0.5.3", features = ["password-hash", "std", "rand"] }
 time = "0.3.47"
-bytes = "1.11.1"
 wincode = "0.5.4"
 dashmap = "6.2.1"
+tempfile = "3.27.0"
+
+# for testing
+[dev-dependencies]
+tempfile = "3.8"
+

@@ -1,27 +1,30 @@
 //! Defines the standard function(s) to properly handle an async connection and apply the network
 //! protocol of STSS.
 
-use std::fmt::{Display, Formatter};
-use std::io::{ErrorKind};
+use dashmap::DashSet;
 use futures::{SinkExt, StreamExt};
 use rsa::RsaPrivateKey;
+use shared_library::network_numbers::NetworkLongLong;
 use shared_library::protocol::{LoginError, Request, Response, SignInError};
-use std::net::{SocketAddr};
+use std::fmt::{Display, Formatter};
+use std::io::ErrorKind;
+use std::net::SocketAddr;
 use std::sync::Arc;
-use dashmap::DashSet;
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio_rustls::server::TlsStream;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
-use shared_library::network_numbers::NetworkLongLong;
 
-use crate::database::{AddTokensError, AuthenticationError, GetTokensError, InternalDataBaseError, RegistrationError, ServerDataBase, SubtractTokensError};
+use crate::database::{
+    AddTokensError, AuthenticationError, GetTokensError, InternalDataBaseError, RegistrationError,
+    ServerDataBase, SubtractTokensError,
+};
 
 /// In order to access the state of the server by a lot of coroutines, we need to abstract it into
 /// a struct to create a shared reference with later.
-/// Therefore, the server state must contain only cheap-to-clone variables, that can call the 
+/// Therefore, the server state must contain only cheap-to-clone variables, that can call the
 /// .clone() method without allocating heap memory.
 #[derive(Clone)]
 pub struct STSServerState {
@@ -72,9 +75,11 @@ pub enum ClosedStreamReason {
 /// Possible errors that might arise when framing the stream.
 #[derive(Error, Debug)]
 pub enum FramingError {
-    #[error("Address {0} isn't respecting the protocol: they declared that a huge amount of data \
+    #[error(
+        "Address {0} isn't respecting the protocol: they declared that a huge amount of data \
              (more than {1}) is coming. Either the user is not respecting the protocol, or it has \
-             malicious intentions. Disconnecting.")]
+             malicious intentions. Disconnecting."
+    )]
     SizeSmashing(SocketAddr, usize),
 
     #[error("An error occurred while framing the communication with {0}: {1}.")]
@@ -107,7 +112,7 @@ pub enum CommunicationError {
     InternalDataBase(#[from] InternalDataBaseError),
 
     #[error(transparent)]
-    Framing(#[from] FramingError)
+    Framing(#[from] FramingError),
 }
 
 // Function conn_handler() and other functions called by it must remain
@@ -131,7 +136,7 @@ pub async fn conn_handler(
         database,
         cancel_token,
         logged_users,
-        signing_key: _signing_key,  // this function won't and doesn't have to use the signing key.
+        signing_key: _signing_key, // this function won't and doesn't have to use the signing key.
     }: &STSServerState,
 ) -> Result<ClosedStreamReason, CommunicationError> {
     loop {
@@ -152,13 +157,12 @@ pub async fn conn_handler(
             }
         };
 
-        let raw_message = result
-            .map_err(|e| match e.kind() {
-                ErrorKind::InvalidData => FramingError::SizeSmashing(
-                    address, stream.codec().max_frame_length()
-                ),
-                _ => FramingError::Generic(address, e.to_string())
-            })?;
+        let raw_message = result.map_err(|e| match e.kind() {
+            ErrorKind::InvalidData => {
+                FramingError::SizeSmashing(address, stream.codec().max_frame_length())
+            }
+            _ => FramingError::Generic(address, e.to_string()),
+        })?;
 
         let request = Request::deserialize(raw_message)
             .map_err(|e| CommunicationError::Parsing(address, e.into()))?;
@@ -181,35 +185,37 @@ pub async fn conn_handler(
                             started_session = Some(Session::bundle(address, username));
                             Response::Ok
                         }
-                    },
+                    }
 
-                    Err(AuthenticationError::InternalDataBase(e)) =>
-                        return Err(CommunicationError::InternalDataBase(e)),
+                    Err(AuthenticationError::InternalDataBase(e)) => {
+                        return Err(CommunicationError::InternalDataBase(e))
+                    }
 
-                    Err(AuthenticationError::UserNotFound(_)) =>
-                        Response::LoginFailed(LoginError::UsernameNotFound),
+                    Err(AuthenticationError::UserNotFound(_)) => {
+                        Response::LoginFailed(LoginError::UsernameNotFound)
+                    }
 
-                    Err(AuthenticationError::InvalidPassword) =>
-                        Response::LoginFailed(LoginError::InvalidPassword),
+                    Err(AuthenticationError::InvalidPassword) => {
+                        Response::LoginFailed(LoginError::InvalidPassword)
+                    }
                 }
-            },
+            }
 
             Request::SignUp(username, password) => {
-                let result = database.try_register_user(username, password).await;
+                let result = database.try_register_user(username, password, address.ip()).await;
 
                 match result {
-                    Ok(()) => {
-                        Response::Ok
-                    }
+                    Ok(()) => Response::Ok,
                     Err(RegistrationError::InternalDataBase(e)) => {
                         return Err(CommunicationError::InternalDataBase(e))
-                    },
-                    Err(RegistrationError::UserAlreadyExists(_user)) =>
+                    }
+                    Err(RegistrationError::UserAlreadyExists(_user)) => {
                         Response::SignInFailed(SignInError::UsernameAlreadyTaken)
+                    }
                 }
-            },
+            }
 
-            _ => Response::NotLoggedIn
+            _ => Response::NotLoggedIn,
         };
 
         match stream.send(response.serialize()?).await {
@@ -217,8 +223,10 @@ pub async fn conn_handler(
             Err(e) => {}
         };
 
-        if let Some(session) = started_session  {
-            match session_handler(&session, &mut stream, state) { _ => {} };
+        if let Some(session) = started_session {
+            match session_handler(&session, &mut stream, state) {
+                _ => {}
+            };
         }
     }
 }
@@ -276,7 +284,7 @@ pub enum OperationalError {
 /// Used when successfully closing a session with a logged user.
 pub enum ClosedSessionReason {
     // session can end for the exact same reasons as a non-logged-in connection may end.
-    ClosedStream(ClosedStreamReason)
+    ClosedStream(ClosedStreamReason),
 }
 
 /// Let's support .into() for ClosedStreamReason, in order to avoid redundant errors.
@@ -294,10 +302,7 @@ impl From<ClosedStreamReason> for ClosedSessionReason {
 /// can be requested.
 #[inline(always)]
 pub async fn session_handler(
-    session @ Session {
-        address,
-        username,
-    }: &Session,
+    session @ Session { address, username }: &Session,
     stream: &mut Framed<TlsStream<TcpStream>, LengthDelimitedCodec>,
     STSServerState {
         database,
@@ -324,32 +329,39 @@ pub async fn session_handler(
             }
         };
 
-        let raw_message = result
-            .map_err(|e| match e.kind() {
-                ErrorKind::InvalidData => FramingError::SizeSmashing(
-                    session.address, stream.codec().max_frame_length()
-                ),
-                _ => FramingError::Generic(session.address, e.to_string())
-            })?;
+        let raw_message = result.map_err(|e| match e.kind() {
+            ErrorKind::InvalidData => {
+                FramingError::SizeSmashing(session.address, stream.codec().max_frame_length())
+            }
+            _ => FramingError::Generic(session.address, e.to_string()),
+        })?;
 
         let request = Request::deserialize(raw_message)
             .map_err(|e| OperationalError::Parsing(session.address, e.into()))?;
 
-        let response : Response = match request {
+        let response: Response = match request {
             // Let's not use "username" because it would shadow the outer variable.
             Request::Login(received_username, received_password) => {
-                info!("User {} tried to log in with username \"{}\" and password \"{}\", but they \
-                       were logged in before.", session, received_username, received_password);
+                info!(
+                    "User {} tried to log in with username \"{}\" and password \"{}\", but they \
+                       were logged in before.",
+                    session, received_username, received_password
+                );
                 Response::LoginFailed(LoginError::AlreadyLoggedIn)
-            },
+            }
 
             Request::SignUp(received_username, received_password) => {
-                info!("User {} tried to sign up with username \"{}\" and password \"{}\", but they \
-                       were logged in before.", session, received_username, received_password);
+                info!(
+                    "User {} tried to sign up with username \"{}\" and password \"{}\", but they \
+                       were logged in before.",
+                    session, received_username, received_password
+                );
                 Response::SignInFailed(SignInError::AlreadyLoggedIn)
-            },
+            }
 
-            Request::SignHash(_) => {unreachable!()},
+            Request::SignHash(_) => {
+                unreachable!()
+            }
 
             Request::PurchaseTokens(be_tokens) => {
                 let tokens = be_tokens.to_host();
@@ -361,19 +373,14 @@ pub async fn session_handler(
                         // send a stronger confirmation that its tokens have been updated.
                         Response::TokenCount(NetworkLongLong::from(new_token_count))
                     }
-                    Err(token_add_error) => {
-                        match token_add_error {
-                            AddTokensError::TokenOverflow => {
-                                Response::TokenAmountTooHigh(be_tokens)
-                            },
-                            AddTokensError::UserDoesNotExist |
-                            AddTokensError::InternalDataBase(_) => {
-                                return Err(token_add_error.into())
-                            }
+                    Err(token_add_error) => match token_add_error {
+                        AddTokensError::TokenOverflow => Response::TokenAmountTooHigh(be_tokens),
+                        AddTokensError::UserDoesNotExist | AddTokensError::InternalDataBase(_) => {
+                            return Err(token_add_error.into())
                         }
-                    }
+                    },
                 }
-            },
+            }
 
             Request::HowManyTokensDoIHave => {
                 match database.get_user_tokens(&username).await {
@@ -384,7 +391,7 @@ pub async fn session_handler(
                     Err(get_tokens_error) => {
                         // get_user_tokens() fails only when integrity is violated. This case does
                         // not have to be handled by the connection handlers, but by the server.
-                        return Err(get_tokens_error.into())
+                        return Err(get_tokens_error.into());
                     }
                 }
             }
@@ -392,7 +399,7 @@ pub async fn session_handler(
 
         if let Err(send_err) = stream.send(response.serialize()?).await {
             match send_err.kind() {
-                _ => todo!()
+                _ => todo!(),
             }
         };
     }

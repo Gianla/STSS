@@ -1,7 +1,7 @@
 //! Implements some utilities for big-endian to host conversion, strongly typing big-endian numbers
 //! to avoid confusion.
 
-use wincode::{SchemaWrite, SchemaRead};
+use wincode::{SchemaRead, SchemaWrite};
 
 /// Macro to avoid error-prone and repetitive definitions.
 macro_rules! define_network_type {

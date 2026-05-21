@@ -1,20 +1,22 @@
 //! Shared network protocol between the client and the server.
 
 use thiserror::Error;
-use wincode::{SchemaWrite, SchemaRead, WriteResult, ReadResult};
+use wincode::{ReadResult, SchemaRead, SchemaWrite, WriteResult};
 
 use crate::network_numbers::NetworkLongLong;
 
 /// Possible errors when a user try to log in.
 #[derive(Error, Debug, SchemaWrite, SchemaRead)]
 pub enum LoginError {
-    #[error("The username you provided wasn't found. Please provide an existing one, or consider \
-             signin in.")]
+    #[error(
+        "The username you provided wasn't found. Please provide an existing one, or consider \
+             signin in."
+    )]
     UsernameNotFound,
 
     #[error("The password you provided was incorrect.")]
     InvalidPassword,
-    
+
     #[error("You are already logged in. Please consider logging out and retry.")]
     AlreadyLoggedIn,
 }
@@ -24,7 +26,7 @@ pub enum LoginError {
 pub enum SignInError {
     #[error("The username you provided was already taken. Please provide another one.")]
     UsernameAlreadyTaken,
-    
+
     #[error("You are already logged in. Please consider logging out and retry.")]
     AlreadyLoggedIn,
 }

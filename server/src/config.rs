@@ -7,9 +7,9 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+use crate::database::DataBaseLocation;
 use crate::server::{KeyContext, LogDestination, RuntimeContext, ServerContext};
 use shared_library::safe_read::{safe_read, SafeReadError};
-use crate::database::DataBaseLocation;
 
 const PEM_EXT: Option<&str> = Some("pem");
 const TOML_EXT: Option<&str> = Some("toml");
@@ -24,7 +24,12 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn new(network: NetworkConfig, runtime: RuntimeConfig, keys: KeysConfig, log: Option<PathBuf>) -> Self {
+    pub fn new(
+        network: NetworkConfig,
+        runtime: RuntimeConfig,
+        keys: KeysConfig,
+        log: Option<PathBuf>,
+    ) -> Self {
         Self {
             network,
             runtime,
@@ -187,14 +192,15 @@ impl Config {
                     parent
                 };
 
-                let filename = path.file_name()
+                let filename = path
+                    .file_name()
                     .ok_or(ServerConfigConversionError::InvalidFileName)?;
 
                 LogDestination::File {
                     dir: dir.to_path_buf(),
                     filename: PathBuf::from(filename),
                 }
-            },
+            }
             None => LogDestination::Stdout,
         };
 
