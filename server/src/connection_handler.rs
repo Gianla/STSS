@@ -3,27 +3,27 @@
 
 use dashmap::DashSet;
 use futures::{SinkExt, StreamExt};
-use rsa::{RsaPrivateKey, Pkcs1v15Sign};
+use rsa::sha2::{Digest, Sha256};
+use rsa::{Pkcs1v15Sign, RsaPrivateKey};
 use shared_library::network_numbers::NetworkLongLong;
 use shared_library::protocol::{LoginError, Request, Response, SignInError, Timestamp};
 use std::fmt::{Display, Formatter};
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio_rustls::server::TlsStream;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
-use rsa::sha2::{Digest, Sha256};
 
 use crate::database::{
     AddTokensError, AuthenticationError, GetTokensError, InternalDataBaseError, RegistrationError,
     ServerDataBase, SubtractTokensError,
 };
-use crate::time_oracle::{TimeOracle};
+use crate::time_oracle::TimeOracle;
 
 /// In order to access the state of the server by a lot of coroutines, we need to abstract it into
 /// a struct to create a shared reference with later.
@@ -126,6 +126,9 @@ pub enum ParsingError {
 /// Possible errors that may happen when communicating with a client.
 #[derive(Error, Debug)]
 pub enum CommunicationError {
+    #[error("Error from user {0}: {1}")]
+    Operational(String, String),
+
     #[error("An error occurred while parsing a message from {0}: {1}.")]
     Parsing(SocketAddr, #[source] ParsingError),
 
@@ -161,7 +164,10 @@ fn send_error_logger<E>(
             );
         }
         ErrorKind::ConnectionReset => {
-            info!("Connection has been reset by {}. Closing the connection.", address);
+            info!(
+                "Connection has been reset by {}. Closing the connection.",
+                address
+            );
         }
         ErrorKind::TimedOut => {
             info!(
@@ -228,8 +234,8 @@ where
         FetchResult::Fatal(framing_err.into())
     })?;
 
-    let request = Request::deserialize(raw_message)
-        .map_err(|e| FetchResult::Fatal(map_parsing_err(e)))?;
+    let request =
+        Request::deserialize(raw_message).map_err(|e| FetchResult::Fatal(map_parsing_err(e)))?;
 
     Ok(request)
 }
@@ -260,12 +266,11 @@ pub async fn conn_handler(
     }: &STSServerState,
 ) -> Result<ClosedStreamReason, CommunicationError> {
     loop {
-        let request = match fetch_next_request(
-            &mut stream,
-            cancel_token,
-            address,
-            |e| CommunicationError::Parsing(address, e.into()),
-        ).await {
+        let request = match fetch_next_request(&mut stream, cancel_token, address, |e| {
+            CommunicationError::Parsing(address, e.into())
+        })
+        .await
+        {
             Ok(req) => req,
             Err(FetchResult::GracefulClose(reason)) => break Ok(reason),
             Err(FetchResult::Fatal(err)) => return Err(err),
@@ -278,7 +283,7 @@ pub async fn conn_handler(
                 // Avoid user enumeration. We first control if the user exists and if the password
                 // is correct. Only then, we control if the user is already logged in. This way,
                 // an attacker can't understand if any user is online, without knowing the password.
-                let result = database.verify_user_password(&username, password).await;
+                let result = database.verify_user_password(&username, &password).await;
 
                 match result {
                     Ok(()) => {
@@ -303,11 +308,17 @@ pub async fn conn_handler(
                     }
 
                     Err(AuthenticationError::UserNotFound(_)) => {
-                        Response::LoginFailed(LoginError::UsernameNotFound)
+                        info!("{} tried to log in with a non-existent username.", &address);
+                        Response::LoginFailed(LoginError::InvalidCredentials)
                     }
 
                     Err(AuthenticationError::InvalidPassword) => {
-                        Response::LoginFailed(LoginError::InvalidPassword)
+                        info!(
+                            "{} tried to log in with username {:?}, but inserted the wrong \
+                             password {:?}.",
+                            &address, username, password
+                        );
+                        Response::LoginFailed(LoginError::InvalidCredentials)
                     }
                 }
             }
@@ -321,7 +332,7 @@ pub async fn conn_handler(
                     Ok(()) => Response::Ok,
                     Err(RegistrationError::InternalDataBase(e)) => {
                         // Same as before (check above comments).
-                        return Err(CommunicationError::InternalDataBase(e))
+                        return Err(CommunicationError::InternalDataBase(e));
                     }
                     Err(RegistrationError::UserAlreadyExists(_user)) => {
                         Response::SignInFailed(SignInError::UsernameAlreadyTaken)
@@ -339,8 +350,26 @@ pub async fn conn_handler(
 
         if let Some(session) = started_session {
             match session_handler(&session, &mut stream, state).await {
-                _ => {}
-            };
+                Err(error) => {
+                    return Err(CommunicationError::Operational(
+                        session.username.clone(),
+                        error.to_string(),
+                    ))
+                }
+                Ok(closed_reason) => {
+                    let reason = match closed_reason {
+                        ClosedSessionReason::ClosedStream(r) => match r {
+                            ClosedStreamReason::InterruptReceived => "server interruption",
+                            ClosedStreamReason::ClientAsked => "client asked",
+                        },
+                        ClosedSessionReason::LoggedOut => "logged out",
+                    };
+                    info!(
+                        "User {} is disconnected from logged connection, reason: {}",
+                        reason, &session,
+                    )
+                }
+            }
             logged_users.remove(&session.username);
         }
     }
@@ -355,7 +384,10 @@ pub struct Session {
 impl Session {
     /// Returns a new Session bundled from an address and a username.
     pub fn bundle(address: SocketAddr, username: impl AsRef<str>) -> Self {
-        Self { address, username: username.as_ref().to_string() }
+        Self {
+            address,
+            username: username.as_ref().to_string(),
+        }
     }
 }
 
@@ -366,17 +398,10 @@ impl Display for Session {
     }
 }
 
-/// Errors that may arise during a trusted connection.
 #[derive(Error, Debug)]
 pub enum OperationalError {
-    #[error("An error occurred while parsing a message from {0}: {1}")]
-    Parsing(SocketAddr, #[source] ParsingError),
-
-    #[error("An error occurred while serializing a response: {0}")]
-    Serialize(#[from] wincode::WriteError),
-
-    #[error("An error occurred while deserializing a request: {0}")]
-    Deserialize(#[from] wincode::ReadError),
+    #[error(transparent)]
+    Communication(#[from] CommunicationError),
 
     #[error(transparent)]
     GetTokens(#[from] GetTokensError),
@@ -387,23 +412,15 @@ pub enum OperationalError {
     #[error(transparent)]
     SubtractTokens(#[from] SubtractTokensError),
 
-    #[error("No connection")]
-    NetworkDown,
-
     #[error("Clock staggered")]
     ClockStaggered,
-
-    #[error(transparent)]
-    InternalDataBase(#[from] InternalDataBaseError),
-
-    #[error(transparent)]
-    Framing(#[from] FramingError),
 }
 
 /// Used when successfully closing a session with a logged user.
 pub enum ClosedSessionReason {
     // Session can end for the exact same reasons as a non-logged-in connection may end.
     ClosedStream(ClosedStreamReason),
+    LoggedOut,
 }
 
 /// Let's support .into() for ClosedStreamReason, in order to avoid redundant errors.
@@ -432,16 +449,17 @@ pub async fn session_handler(
     }: &STSServerState,
 ) -> Result<ClosedSessionReason, OperationalError> {
     loop {
-        let request = match fetch_next_request(
-            stream,
-            cancel_token,
-            session.address,
-            |e| OperationalError::Parsing(session.address, e.into()),
-        ).await {
+        let request = match fetch_next_request(stream, cancel_token, session.address, |e| {
+            CommunicationError::Parsing(session.address, e.into())
+        })
+        .await
+        {
             Ok(req) => req,
             Err(FetchResult::GracefulClose(reason)) => break Ok(reason.into()),
-            Err(FetchResult::Fatal(err)) => return Err(err),
+            Err(FetchResult::Fatal(err)) => return Err(OperationalError::from(err)),
         };
+
+        let mut has_to_logout = false;
 
         let response: Response = match request {
             // Let's not use "username" because it would shadow the outer variable.
@@ -463,27 +481,52 @@ pub async fn session_handler(
                 Response::SignInFailed(SignInError::AlreadyLoggedIn)
             }
 
+            Request::LogOut => {
+                has_to_logout = true; // a bit dirty but that's what we need for now.
+                Response::Ok
+            }
+
             Request::SignHash(raw_hash) => {
                 let timestamp = match time_oracle.time_now().duration_since(UNIX_EPOCH) {
                     Ok(ts) => Timestamp::from(ts.as_nanos()),
-                    Err(_) => return Err( OperationalError::ClockStaggered )
+                    Err(_) => return Err(OperationalError::ClockStaggered),
                 };
 
                 match generate_timestamp_signature(signing_key, &raw_hash, timestamp) {
                     Ok(sign) => {
                         info!(
                             "User {} required to sign the hash {}.",
-                            address, hex::encode(raw_hash)
+                            address,
+                            hex::encode(raw_hash)
                         );
-                        Response::Token { sign, timestamp }
-                    },
+                        if let Err(e) = database.subtract_user_tokens(username, 1).await {
+                            match e {
+                                SubtractTokensError::InsufficientTokens => {
+                                    // Normal case that the session handler can work with, since
+                                    // it perfectly fits into its responsibilities. A user asked
+                                    // to sign a hash, but they have no tokens.
+                                    Response::NotEnoughTokens
+                                }
+                                // Both of these are assertion errors. The user MUST exist in the
+                                // database if they're logged in. So we return the responsibility
+                                // to the caller.
+                                SubtractTokensError::UserDoesNotExist
+                                | SubtractTokensError::InternalDataBase(_) => {
+                                    return Err(OperationalError::from(e))
+                                }
+                            }
+                        } else {
+                            Response::Token { sign, timestamp }
+                        }
+                    }
                     Err(e) => {
                         error!(
                             "[Critical] An hashing operation returned an error: {}. \
-                             This should be impossible.", e.to_string()
+                             This should be impossible.",
+                            e.to_string()
                         );
                         Response::OperationError(
-                            "Error while performing the operation.".to_string()
+                            "Error while performing the operation.".to_string(),
                         )
                     }
                 }
@@ -523,8 +566,16 @@ pub async fn session_handler(
             }
         };
 
-        if let Err(send_err) = stream.send(response.serialize()?).await {
-            send_error_logger(send_err, address, OperationalError::NetworkDown)?;
+        let serialized_response = response
+            .serialize()
+            .map_err(CommunicationError::Serialize)?;
+
+        if let Err(send_err) = stream.send(serialized_response).await {
+            send_error_logger(send_err, address, CommunicationError::NetworkDown)?;
         };
+
+        if has_to_logout {
+            return Ok(ClosedSessionReason::LoggedOut);
+        }
     }
 }

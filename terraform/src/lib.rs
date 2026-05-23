@@ -7,11 +7,10 @@ use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
 use rsa::{RsaPrivateKey, RsaPublicKey};
 use std::collections::HashSet;
 use std::convert::Into;
+use std::env::current_dir;
 use std::fmt::Formatter;
 use std::path::{Component, Path, PathBuf};
 use std::{fmt, fs, io};
-use std::env::current_dir;
-use std::str::FromStr;
 use thiserror::Error;
 
 use server::config::{Config, KeysConfig, NetworkConfig, RuntimeConfig, TimeOracleConfig};
@@ -394,8 +393,10 @@ pub enum TomlGenError {
     #[error("I/O Error while writing {0:?}: {1}")]
     Io(String, std::io::Error),
 
-    #[error("Error while getting the absolute path of {0:?}: {1:?}, probably, the toml generation \
-             function has been called before the files it refers to")]
+    #[error(
+        "Error while getting the absolute path of {0:?}: {1:?}, probably, the toml generation \
+         function has been called before the files it refers to"
+    )]
     Canonicalize(String, std::io::Error),
 
     #[error("invalid path {0:?}, please use a standard utf-8 format")]
@@ -409,7 +410,7 @@ pub enum TomlGenError {
 
     #[error(
         "incoherent thread limits: they should be strictly increasing while {0} and {1}, where \
-             {0} >= {1} has been given"
+         {0} >= {1} has been given"
     )]
     IncoherentThreadLimits(usize, usize),
 }
@@ -617,7 +618,9 @@ impl Generator {
         println!("I am in {:?}", current_dir());
 
         let get_canonical_path = |file_name: &str| {
-            self.env.server_dir.join(file_name)
+            self.env
+                .server_dir
+                .join(file_name)
                 .canonicalize()
                 .map_err(|e| TomlGenError::Canonicalize(file_name.to_string(), e))
         };

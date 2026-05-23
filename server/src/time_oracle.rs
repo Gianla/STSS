@@ -1,10 +1,10 @@
-use std::net::{SocketAddr, UdpSocket, ToSocketAddrs};
-use std::sync::Arc;
+use sntpc::{get_time, NtpContext, StdTimestampGen};
+use sntpc_net_tokio::UdpSocketWrapper;
+use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
-use sntpc::{NtpContext, StdTimestampGen, get_time};
-use sntpc_net_tokio::UdpSocketWrapper;
 use tracing::{info, warn};
 
 use crate::server::NetworkPort;
@@ -20,7 +20,7 @@ pub struct TimeOracleBundle {
 /// return such bundle. At the same time, we add a into_parts() method in order to force the caller
 /// to get both owned and to handle them properly at the same time, so that they won't be lost.
 impl TimeOracleBundle {
-    fn internal_new(oracle: TimeOracle, worker: TimeSyncWorker ) -> Self {
+    fn internal_new(oracle: TimeOracle, worker: TimeSyncWorker) -> Self {
         Self { oracle, worker }
     }
 
@@ -82,21 +82,22 @@ impl TimeOracle {
 
         let ntp_server_addr = (ntp_server_host.as_str(), port)
             .to_socket_addrs()
-            .map_err(|e|
+            .map_err(|e| {
                 TimeOracleError::NoDnsAddress(
                     format!("{}:{}", ntp_server_host, port),
-                    e.to_string()
+                    e.to_string(),
                 )
-            )?
+            })?
             .next()
-            .ok_or_else(||
+            .ok_or_else(|| {
                 TimeOracleError::NoAddressSpecified(format!("{}:{}", ntp_server_host, port))
-            )?;
+            })?;
 
         let listener = UdpSocket::bind(listener_address)
             .map_err(|e| TimeOracleError::ListenerError(listener_address, e.to_string()))?;
 
-        listener.set_nonblocking(true)
+        listener
+            .set_nonblocking(true)
             .map_err(|e| TimeOracleError::SocketSetNonBlocking(e.to_string()))?;
 
         let sntpc_context = NtpContext::new(StdTimestampGen::default());
@@ -114,7 +115,7 @@ impl TimeOracle {
             offset_nanos,
         };
 
-        Ok( TimeOracleBundle::internal_new(oracle, worker) )
+        Ok(TimeOracleBundle::internal_new(oracle, worker))
     }
 
     /// Returns the current time, adjusted with the outside NTP server's clock.
@@ -158,11 +159,13 @@ impl TimeSyncWorker {
             let addr = match tokio::net::lookup_host(&self.ntp_server_addr).await {
                 Ok(mut addrs) => match addrs.next() {
                     Some(a) => a,
-                    None => return Err(
-                        TimeOracleError::HostnameNotFound(self.ntp_server_addr.to_string())
-                    ),
+                    None => {
+                        return Err(TimeOracleError::HostnameNotFound(
+                            self.ntp_server_addr.to_string(),
+                        ))
+                    }
                 },
-                Err(e) => return Err( TimeOracleError::GenericNetworkError(e.to_string()) ),
+                Err(e) => return Err(TimeOracleError::GenericNetworkError(e.to_string())),
             };
 
             match get_time(addr, &sntpc_wrapper, self.sntpc_context).await {
@@ -177,9 +180,9 @@ impl TimeSyncWorker {
 
                         self.offset_nanos.store(offset, Ordering::Relaxed);
                     } else {
-                        return Err( TimeOracleError::TimeWentBackwards )
+                        return Err(TimeOracleError::TimeWentBackwards);
                     }
-                },
+                }
                 Err(error) => match error {
                     sntpc::Error::Network => {
                         info!(
@@ -202,9 +205,9 @@ impl TimeSyncWorker {
                         // format it on our own.
                         let error_string = format!("{:?}", error);
 
-                        return Err( TimeOracleError::GenericNetworkError(error_string) )
+                        return Err(TimeOracleError::GenericNetworkError(error_string));
                     }
-                }
+                },
             }
         }
     }
@@ -236,12 +239,9 @@ mod tests {
         let sync_interval = Duration::from_millis(50);
 
         // Create the bundle using the mock server address.
-        let bundle = TimeOracle::create_bundle(
-            "127.0.0.1".to_string(),
-            port,
-            listener_addr,
-            sync_interval,
-        ).unwrap();
+        let bundle =
+            TimeOracle::create_bundle("127.0.0.1".to_string(), port, listener_addr, sync_interval)
+                .unwrap();
 
         let (oracle, worker) = bundle.into_parts();
 
@@ -254,7 +254,10 @@ mod tests {
         let mut buf = [0u8; 1024];
         let (size, client_addr) = mock_server.recv_from(&mut buf).await.unwrap();
 
-        assert!(size >= 48, "The client should send at least a 48 byte payload.");
+        assert!(
+            size >= 48,
+            "The client should send at least a 48 byte payload."
+        );
 
         // Build the mock response based on the client request.
         let mut response = [0u8; 48];
@@ -284,7 +287,10 @@ mod tests {
 
         // Verify that the offset has been updated.
         let offset = oracle.get_offset_for_testing();
-        assert_ne!(offset, 0, "The offset should have been updated by the mock server.");
+        assert_ne!(
+            offset, 0,
+            "The offset should have been updated by the mock server."
+        );
 
         // Abort the background task to cleanly exit the test.
         worker_handle.abort();

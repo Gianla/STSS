@@ -11,8 +11,8 @@ use thiserror::Error;
 
 use crate::database::DataBaseLocation;
 use crate::server::{KeyContext, LogDestination, NetworkPort, RuntimeContext, ServerContext};
-use shared_library::safe_read::{safe_read, SafeReadError};
 use crate::time_oracle::{TimeOracle, TimeOracleError};
+use shared_library::safe_read::{safe_read, SafeReadError};
 
 const PEM_EXT: Option<&str> = Some("pem");
 const TOML_EXT: Option<&str> = Some("toml");
@@ -171,7 +171,7 @@ pub enum ServerConfigConversionError {
 
     #[error("expected a smaller amount of minutes")]
     TooManyMinutes,
-    
+
     #[error(transparent)]
     TimeOracle(#[from] TimeOracleError),
 
@@ -185,8 +185,8 @@ impl Config {
         let raw_toml = String::from_utf8(safe_read(path, TOML_EXT)?)
             .map_err(|e| ConfigError::TomlNotInUtf8(e.to_string()))?;
 
-        let conf: Config = toml::from_str(&raw_toml)
-            .map_err(|e| ConfigError::Parse(e.to_string()))?;
+        let conf: Config =
+            toml::from_str(&raw_toml).map_err(|e| ConfigError::Parse(e.to_string()))?;
 
         Ok(conf)
     }
@@ -227,7 +227,7 @@ impl Config {
         let destination = match self.log {
             Some(path) => {
                 let parent = path.parent().unwrap_or(Path::new(""));
-                
+
                 let dir = if parent.as_os_str().is_empty() {
                     Path::new(".")
                 } else {
@@ -275,13 +275,10 @@ impl Config {
         let time_oracle_ip: IpAddr = IpAddr::from_str(&self.time_oracle.listener_ip)
             .map_err(|e| ServerConfigConversionError::IpParse(e.to_string()))?;
 
-        let time_oracle_address = SocketAddr::new(
-            time_oracle_ip,
-            self.time_oracle.listener_port
-        );
+        let time_oracle_address = SocketAddr::new(time_oracle_ip, self.time_oracle.listener_port);
 
         let interval_in_seconds = match self.time_oracle.sync_interval_in_minutes.checked_mul(60) {
-            None => return Err( ServerConfigConversionError::TooManyMinutes ),
+            None => return Err(ServerConfigConversionError::TooManyMinutes),
             Some(sync_interval) => sync_interval,
         };
 
@@ -289,7 +286,7 @@ impl Config {
             self.time_oracle.ntp_server_host,
             ntp_server_port,
             time_oracle_address,
-            Duration::from_secs(interval_in_seconds as u64)
+            Duration::from_secs(interval_in_seconds as u64),
         )?;
 
         Ok(ServerContext::new(

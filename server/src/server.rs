@@ -1,10 +1,15 @@
 //! Contains the main component for the server, with network and cryptography utilities.
 
+use crate::connection_handler::STSServerState;
+use crate::connection_handler::{conn_handler, CommunicationError};
+use crate::database::{DataBaseBuildError, DataBaseLocation, ServerDataBaseBuilder};
+use crate::server::NetworkPort::{AnyFreePort, Port};
+use crate::time_oracle::{TimeOracleBundle, TimeSyncWorker};
 use rsa::RsaPrivateKey;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::ServerConfig;
 use std::io::ErrorKind;
-use std::net::{SocketAddr};
+use std::net::SocketAddr;
 use std::num::NonZero;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -16,11 +21,6 @@ use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 use tracing_appender::non_blocking::WorkerGuard;
-use crate::time_oracle::{TimeOracleBundle, TimeSyncWorker};
-use crate::connection_handler::conn_handler;
-use crate::connection_handler::STSServerState;
-use crate::database::{DataBaseBuildError, DataBaseLocation, ServerDataBaseBuilder};
-use crate::server::NetworkPort::{AnyFreePort, Port};
 
 /// Where to write logs. For the moment, we support stdout and a filepath.
 pub enum LogDestination {
@@ -246,9 +246,8 @@ impl STSServer {
 
         let tls_acceptor = TlsAcceptor::from(Arc::new(config));
 
-        let database = rt.block_on(async {
-            ServerDataBaseBuilder::build(database_location).await
-        })?;
+        let database =
+            rt.block_on(async { ServerDataBaseBuilder::build(database_location).await })?;
 
         let cancel_token = CancellationToken::new();
         let (time_oracle, worker) = time_oracle_bundle.into_parts();
@@ -279,11 +278,13 @@ impl STSServer {
             if let Some(worker) = time_oracle_worker.take() {
                 tokio::spawn(async move {
                     if let Err(e) = worker.start_syncing().await {
-                        error!("Fatal syncing error: {}. Interrupting the server.", e.to_string());
+                        error!(
+                            "Fatal syncing error: {}. Interrupting the server.",
+                            e.to_string()
+                        );
                         token_for_sync.cancel();
                     }
                 });
-
             } else {
                 error!(
                     "Assertion: worker was already taken, but this should be impossible. \
@@ -387,9 +388,17 @@ impl STSServer {
                 );
 
                 // pass the correct, encrypted and framed stream to the main connection manager.
-                match conn_handler(new_address, framed_stream, &state_clone).await {
-                    Ok(_) => {}
-                    Err(_) => {}
+                if let Err(e) = conn_handler(new_address, framed_stream, &state_clone).await {
+                    match e {
+                        // todo
+                        CommunicationError::Operational(_, _) => {}
+                        CommunicationError::Parsing(_, _) => {}
+                        CommunicationError::Serialize(_) => {}
+                        CommunicationError::Deserialize(_) => {}
+                        CommunicationError::NetworkDown => {}
+                        CommunicationError::InternalDataBase(_) => {}
+                        CommunicationError::Framing(_) => {}
+                    }
                 };
                 /*
                 match frame_error.kind() {

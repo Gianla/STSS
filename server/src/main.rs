@@ -38,15 +38,16 @@ fn main() -> Result<()> {
         let config = Config::from_file(toml_file)
             .context("Error while obtaining the configurations from the file")?;
 
-        let server_context = config.to_server_context()
+        let server_context = config
+            .to_server_context()
             .context("Error while parsing the configuration file")?;
 
         let server = STSServer::build_from_context(server_context)
             .context("Error while creating the server")?;
 
-        server.run()
+        server
+            .run()
             .context("Running the server resulted into an error")
-
     } else if let Some(_ca_address) = cli.rekey {
         println!("This is to do!");
         Ok(())

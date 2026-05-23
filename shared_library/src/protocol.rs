@@ -1,7 +1,7 @@
 //! Shared network protocol between the client and the server.
 
 use thiserror::Error;
-use wincode::{ReadResult, WriteResult, SchemaRead, SchemaWrite};
+use wincode::{ReadResult, SchemaRead, SchemaWrite, WriteResult};
 
 use crate::network_numbers::NetworkLongLong;
 
@@ -13,7 +13,7 @@ impl Timestamp {
     pub fn from(n: u128) -> Self {
         Self(n)
     }
-    
+
     pub fn get(&self) -> u128 {
         self.0
     }
@@ -22,14 +22,8 @@ impl Timestamp {
 /// Possible errors when a user try to log in.
 #[derive(Error, Debug, SchemaWrite, SchemaRead)]
 pub enum LoginError {
-    #[error(
-        "The username you provided wasn't found. Please provide an existing one, or consider \
-             signin in."
-    )]
-    UsernameNotFound,
-
-    #[error("The password you provided was incorrect.")]
-    InvalidPassword,
+    #[error("Wrong username or password.")]
+    InvalidCredentials,
 
     #[error("You are already logged in. Please consider logging out and retry.")]
     AlreadyLoggedIn,
@@ -50,6 +44,7 @@ pub enum SignInError {
 pub enum Request {
     Login(String, String),
     SignUp(String, String),
+    LogOut,
     SignHash([u8; 32]),
     PurchaseTokens(NetworkLongLong),
     HowManyTokensDoIHave,
@@ -64,6 +59,7 @@ pub enum Response {
     NotLoggedIn,
     TokenCount(NetworkLongLong),
     TokenAmountTooHigh(NetworkLongLong),
+    NotEnoughTokens,
     Token { sign: Vec<u8>, timestamp: Timestamp },
     OperationError(String),
 }

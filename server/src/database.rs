@@ -338,9 +338,7 @@ impl ServerDataBaseBuilder {
     /// Even if the underlying engine uses sqlx, an async library, this method abstracts the
     /// asynchronous complexity by creating a small runtime to execute asynchronous functions
     /// in order, thus we call it build().
-    pub async fn build(
-        location: DataBaseLocation,
-    ) -> Result<ServerDataBase, DataBaseBuildError> {
+    pub async fn build(location: DataBaseLocation) -> Result<ServerDataBase, DataBaseBuildError> {
         let mut build_ctx = Self::unchecked_build(location).await?;
 
         if build_ctx.initialization_is_required {
@@ -652,9 +650,9 @@ mod tests {
             );
             "#,
         )
-            .execute(&pool)
-            .await
-            .unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
 
         sqlx::query("INSERT INTO users (username, password_hash, available_tokens, registered_from_ip) VALUES ('hacker', 'hash', -5, '127.0.0.1')")
             .execute(&pool)
@@ -663,8 +661,9 @@ mod tests {
 
         pool.close().await;
 
-        let err =
-            ServerDataBaseBuilder::build(DataBaseLocation::Disk(db_path)).await.unwrap_err();
+        let err = ServerDataBaseBuilder::build(DataBaseLocation::Disk(db_path))
+            .await
+            .unwrap_err();
 
         assert!(
             matches!(err, DataBaseBuildError::ConstraintViolation(name) if name == "hacker"),
@@ -683,8 +682,9 @@ mod tests {
         let pool = SqlitePoolOptions::new().connect_with(opts).await.unwrap();
         pool.close().await;
 
-        let err =
-            ServerDataBaseBuilder::build(DataBaseLocation::Disk(db_path)).await.unwrap_err();
+        let err = ServerDataBaseBuilder::build(DataBaseLocation::Disk(db_path))
+            .await
+            .unwrap_err();
 
         assert!(
             matches!(err, DataBaseBuildError::Validation(_)),
@@ -697,8 +697,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("strict.db");
 
-        let _ =
-            ServerDataBaseBuilder::build(DataBaseLocation::Disk(db_path.clone())).await.unwrap();
+        let _ = ServerDataBaseBuilder::build(DataBaseLocation::Disk(db_path.clone()))
+            .await
+            .unwrap();
 
         let opts = SqliteConnectOptions::new().filename(&db_path);
         let pool = SqlitePoolOptions::new().connect_with(opts).await.unwrap();
@@ -708,8 +709,9 @@ mod tests {
             .unwrap();
         pool.close().await;
 
-        let err =
-            ServerDataBaseBuilder::build(DataBaseLocation::Disk(db_path)).await.unwrap_err();
+        let err = ServerDataBaseBuilder::build(DataBaseLocation::Disk(db_path))
+            .await
+            .unwrap_err();
 
         assert!(
             matches!(err, DataBaseBuildError::UnexpectedTable(name) if name == "secret_backdoor"),
