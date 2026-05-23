@@ -10,9 +10,11 @@ use std::convert::Into;
 use std::fmt::Formatter;
 use std::path::{Component, Path, PathBuf};
 use std::{fmt, fs, io};
+use std::env::current_dir;
+use std::str::FromStr;
 use thiserror::Error;
 
-use server::config::{Config, KeysConfig, NetworkConfig, RuntimeConfig};
+use server::config::{Config, KeysConfig, NetworkConfig, RuntimeConfig, TimeOracleConfig};
 
 /// Abstracts a String into a filesystem name, which can be a file or the name of a single
 /// directory. This is useful when working with directories and files,
@@ -392,6 +394,10 @@ pub enum TomlGenError {
     #[error("I/O Error while writing {0:?}: {1}")]
     Io(String, std::io::Error),
 
+    #[error("Error while getting the absolute path of {0:?}: {1:?}, probably, the toml generation \
+             function has been called before the files it refers to")]
+    Canonicalize(String, std::io::Error),
+
     #[error("invalid path {0:?}, please use a standard utf-8 format")]
     InvalidUtf8Path(String),
 
@@ -501,7 +507,7 @@ impl Generator {
         let server_tls_key_pem = server_tls_keypair.serialize_pem();
 
         // create the server's Certificate Params.
-        let mut server_tls_params = CertificateParams::new(vec!["localhost".to_string()])
+        let mut server_tls_params = CertificateParams::new(vec!["127.0.0.1".to_string()])
             .map_err(|e| KeyGenError::CACertificateCreation(e.to_string()))?;
         server_tls_params
             .distinguished_name
@@ -606,21 +612,29 @@ impl Generator {
         &self,
         thread_limits: Option<(usize, usize)>,
     ) -> Result<(), TomlGenError> {
-        let (is_crypto_hardware_accelerated, num_threads) =
-            heuristic_working_threads(thread_limits);
+        let (is_crypto_hardware_accelerated, n_threads) = heuristic_working_threads(thread_limits);
 
-        let tls_cert_path = self.server_files.tls_cert_name.as_str();
-        let tls_priv_path = self.server_files.tls_key_name.as_str();
-        let tss_pub_path = self.server_files.sign_pub_key_name.as_str();
-        let tss_priv_path = self.server_files.sign_priv_key_name.as_str();
+        println!("I am in {:?}", current_dir());
+
+        let get_canonical_path = |file_name: &str| {
+            self.env.server_dir.join(file_name)
+                .canonicalize()
+                .map_err(|e| TomlGenError::Canonicalize(file_name.to_string(), e))
+        };
+
+        let tls_cert_path = get_canonical_path(self.server_files.tls_cert_name.as_str())?;
+        let tls_priv_path = get_canonical_path(self.server_files.tls_key_name.as_str())?;
+        let tss_priv_path = get_canonical_path(self.server_files.sign_priv_key_name.as_str())?;
+        let ca_cert_path = get_canonical_path(self.ca_files.tls_cert_name.as_str())?;
 
         let default = Config::new(
-            NetworkConfig::new(String::from("localhost"), 8080),
+            NetworkConfig::new(String::from("127.0.0.1"), 8080),
             RuntimeConfig::new(
-                num_threads,
+                n_threads,
                 if is_crypto_hardware_accelerated { 0 } else { 1 },
             ),
-            KeysConfig::new(tls_cert_path, tls_priv_path, tss_pub_path, tss_priv_path),
+            KeysConfig::new(tls_cert_path, tls_priv_path, tss_priv_path, ca_cert_path),
+            TimeOracleConfig::new("pool.ntp.org".to_string(), 123, "0.0.0.0".to_string(), 0, 5),
             None,
         );
 

@@ -7,13 +7,12 @@ use argon2::{
     password_hash::{PasswordHash, PasswordVerifier},
     Argon2, PasswordHasher,
 };
-use futures::executor::block_on;
 use futures::TryStreamExt;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{FromRow, SqlitePool};
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::{fs, io};
-use std::net::IpAddr;
 use thiserror::Error;
 
 pub enum DataBaseLocation {
@@ -157,7 +156,10 @@ impl ServerDataBase {
 
         let parsed_hash = PasswordHash::new(&stored_hash).map_err(InternalDataBaseError::Hash)?;
 
-        match self.verifier.verify_password(plain_password.as_ref().as_bytes(), &parsed_hash) {
+        match self
+            .verifier
+            .verify_password(plain_password.as_ref().as_bytes(), &parsed_hash)
+        {
             Ok(_) => Ok(()),
             Err(_) => Err(AuthenticationError::InvalidPassword),
         }
@@ -335,29 +337,24 @@ impl ServerDataBaseBuilder {
     /// Builds the database connecting to a given one or creating it.
     /// Even if the underlying engine uses sqlx, an async library, this method abstracts the
     /// asynchronous complexity by creating a small runtime to execute asynchronous functions
-    /// in order, thus we call it blocking_build().
-    pub fn blocking_build(
+    /// in order, thus we call it build().
+    pub async fn build(
         location: DataBaseLocation,
     ) -> Result<ServerDataBase, DataBaseBuildError> {
-        let build = block_on(async {
-            let mut build_ctx = Self::unchecked_build(location).await?;
+        let mut build_ctx = Self::unchecked_build(location).await?;
 
-            if build_ctx.initialization_is_required {
-                build_ctx.initialize_db().await?;
-            } else {
-                build_ctx.validate().await?;
-            }
+        if build_ctx.initialization_is_required {
+            build_ctx.initialize_db().await?;
+        } else {
+            build_ctx.validate().await?;
+        }
 
-            Ok::<_, DataBaseBuildError>(build_ctx)
-        })?;
-
-        Ok(ServerDataBase::internal_new(build.connection_pool))
+        Ok(ServerDataBase::internal_new(build_ctx.connection_pool))
     }
 
     /// Builds a ServerDataBase without checking the right conditions, avoiding performance losses
     /// but introducing runtime risks.
     /// If used with checking functions, it becomes safe: the main constructor does that.
-
     async fn unchecked_build(location: DataBaseLocation) -> Result<Self, DataBaseBuildError> {
         let connection_options = SqliteConnectOptions::new().pragma("foreign_keys", "ON");
         let mut pool_options = SqlitePoolOptions::new();
@@ -383,9 +380,7 @@ impl ServerDataBaseBuilder {
             }
         };
 
-        let connection_pool = pool_options
-            .connect_with(connection_options)
-            .await?;
+        let connection_pool = pool_options.connect_with(connection_options).await?;
 
         Ok(Self {
             connection_pool,
@@ -415,8 +410,8 @@ impl ServerDataBaseBuilder {
             );
             "#,
         )
-            .execute(&self.connection_pool)
-            .await?;
+        .execute(&self.connection_pool)
+        .await?;
 
         self.initialization_is_required = false;
         Ok(())
@@ -425,10 +420,10 @@ impl ServerDataBaseBuilder {
     /// Validates an already existing database through validation queries.
     async fn validate(&self) -> Result<(), DataBaseBuildError> {
         let table_names: Vec<String> = sqlx::query_scalar(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
         )
-            .fetch_all(&self.connection_pool)
-            .await?;
+        .fetch_all(&self.connection_pool)
+        .await?;
 
         let expected_tables = ["users", "history"];
 
@@ -455,6 +450,12 @@ impl ServerDataBaseBuilder {
         #[derive(Debug, FromRow)]
         struct UserAudit {
             username: String,
+            // We have the need to extract "available_tokens" from the database, and in order for
+            // sqlx to work we have to name it exactly that way, or we must create an alias in the
+            // query. If we apply the first strategy (as we did), we won't use
+            // UserAudit.available_tokens anymore, and the compiler will get angry for that. So
+            // we must allow it to be a "dead" variable.
+            #[allow(dead_code)]
             available_tokens: i32,
             is_valid: bool,
         }
@@ -482,44 +483,43 @@ impl ServerDataBaseBuilder {
 
 #[cfg(test)]
 mod tests {
-    use std::net::Ipv6Addr;
-    use std::str::FromStr;
     use super::*;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use std::net::Ipv6Addr;
+    use std::str::FromStr;
     use tempfile::tempdir;
 
-    /// Helper to create a clean, fresh in-memory DB for each test.
-    fn setup_memory_db() -> ServerDataBase {
-        ServerDataBaseBuilder::blocking_build(DataBaseLocation::Memory)
+    async fn setup_memory_db() -> ServerDataBase {
+        ServerDataBaseBuilder::build(DataBaseLocation::Memory)
+            .await
             .expect("Failed to create in-memory database")
     }
 
     #[tokio::test]
     async fn test_register_and_verify_success() {
-        let db = setup_memory_db();
+        let db = setup_memory_db().await;
         let user = "alice";
         let password = "SuperSecretPassword123!";
         let ip = IpAddr::from_str("127.0.0.1").unwrap();
 
-        // Test registration.
         let reg_result = db.try_register_user(user, password, ip).await;
         assert!(reg_result.is_ok(), "Registration should succeed");
 
-        // Test login with the correct password.
         let auth_result = db.verify_user_password(user, password).await;
-        assert!(auth_result.is_ok(), "Authentication should succeed with correct password");
+        assert!(
+            auth_result.is_ok(),
+            "Authentication should succeed with correct password"
+        );
     }
 
     #[tokio::test]
     async fn test_registration_duplicate_user() {
-        let db = setup_memory_db();
+        let db = setup_memory_db().await;
         let user = "bob";
         let ip = IpAddr::from_str("::1").unwrap();
 
-        // First registration should succeed.
         db.try_register_user(user, "pass", ip).await.unwrap();
 
-        // Trying to register the exact same user again.
         let err = db.try_register_user(user, "pass", ip).await.unwrap_err();
         assert!(
             matches!(err, RegistrationError::UserAlreadyExists(_)),
@@ -529,20 +529,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_verify_user_not_found_and_invalid_password() {
-        let db = setup_memory_db();
+        let db = setup_memory_db().await;
         let user = "charlie";
         let ip = IpAddr::from_str("127.0.0.1").unwrap();
 
-        // User does not exist.
         let err = db.verify_user_password("ghost", "pass").await.unwrap_err();
         assert!(
             matches!(err, AuthenticationError::UserNotFound(_)),
             "Expected UserNotFound error for non-existent user"
         );
 
-        // Incorrect password.
-        db.try_register_user(user, "correct_pass", ip).await.unwrap();
-        let err = db.verify_user_password(user, "wrong_pass").await.unwrap_err();
+        db.try_register_user(user, "correct_pass", ip)
+            .await
+            .unwrap();
+        let err = db
+            .verify_user_password(user, "wrong_pass")
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, AuthenticationError::InvalidPassword),
             "Expected InvalidPassword error"
@@ -551,28 +554,25 @@ mod tests {
 
     #[tokio::test]
     async fn test_tokens_operations_success() {
-        let db = setup_memory_db();
+        let db = setup_memory_db().await;
         let user = "dave";
         let ip = IpAddr::from_str("::1").unwrap();
 
         db.try_register_user(user, "pass", ip).await.unwrap();
 
-        // Initial check: tokens should be 0.
         let tokens = db.get_user_tokens(user).await.unwrap();
         assert_eq!(tokens, 0, "Initial tokens should be 0");
 
-        // Add 50 tokens.
         let tokens = db.add_user_tokens(user, 50).await.unwrap();
         assert_eq!(tokens, 50, "Tokens should be 50 after addition");
 
-        // Subtract 20 tokens.
         let tokens = db.subtract_user_tokens(user, 20).await.unwrap();
         assert_eq!(tokens, 30, "Tokens should be 30 after subtraction");
     }
 
     #[tokio::test]
     async fn test_tokens_subtraction_insufficient() {
-        let db = setup_memory_db();
+        let db = setup_memory_db().await;
         let user = "eve";
         let ip = IpAddr::from_str("127.127.120.2").unwrap();
 
@@ -580,7 +580,6 @@ mod tests {
 
         db.add_user_tokens(user, 10).await.unwrap();
 
-        // Try to subtract 15 tokens when the user only has 10.
         let err = db.subtract_user_tokens(user, 15).await.unwrap_err();
         assert!(
             matches!(err, SubtractTokensError::InsufficientTokens),
@@ -590,7 +589,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tokens_user_not_found() {
-        let db = setup_memory_db();
+        let db = setup_memory_db().await;
 
         let err_get = db.get_user_tokens("ghost").await.unwrap_err();
         assert!(matches!(err_get, GetTokensError::UserDoesNotExist));
@@ -602,32 +601,28 @@ mod tests {
         assert!(matches!(err_sub, SubtractTokensError::UserDoesNotExist));
     }
 
-    // ==========================================
-    // 2. DISK INTEGRITY AND VALIDATION TESTS
-    // ==========================================
-
     #[tokio::test]
     async fn test_disk_db_creation_and_reload() {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("test.db");
 
-        // 1. Initial creation (should trigger initialize_db).
         {
-            let db = ServerDataBaseBuilder::blocking_build(DataBaseLocation::Disk(db_path.clone()))
+            let db = ServerDataBaseBuilder::build(DataBaseLocation::Disk(db_path.clone()))
+                .await
                 .expect("Failed to create database on disk");
 
             let ip = Ipv6Addr::new(65000, 65002, 65006, 65008, 65010, 64999, 65100, 65101);
 
-            // Insert data to verify persistence.
-            db.try_register_user("frank", "pass", IpAddr::from(ip)).await.unwrap();
-        } // `db` goes out of scope here, safely closing the pool.
+            db.try_register_user("frank", "pass", IpAddr::from(ip))
+                .await
+                .unwrap();
+        }
 
-        // 2. Reloading (should trigger validate).
         {
-            let db2 = ServerDataBaseBuilder::blocking_build(DataBaseLocation::Disk(db_path))
+            let db2 = ServerDataBaseBuilder::build(DataBaseLocation::Disk(db_path))
+                .await
                 .expect("Failed to reload existing database");
 
-            // Verify the user still exists.
             let tokens = db2.get_user_tokens("frank").await.unwrap();
             assert_eq!(tokens, 0);
         }
@@ -638,8 +633,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("corrupted.db");
 
-        // No constraint.
-        let opts = SqliteConnectOptions::new().filename(&db_path).create_if_missing(true);
+        let opts = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(true);
         let pool = SqlitePoolOptions::new().connect_with(opts).await.unwrap();
 
         sqlx::query(
@@ -654,10 +650,12 @@ mod tests {
                 username TEXT NOT NULL, timestamp INTEGER NOT NULL, hash TEXT NOT NULL,
                 PRIMARY KEY (username, timestamp)
             );
-            "#
-        ).execute(&pool).await.unwrap();
+            "#,
+        )
+            .execute(&pool)
+            .await
+            .unwrap();
 
-        // Inject the wrong value.
         sqlx::query("INSERT INTO users (username, password_hash, available_tokens, registered_from_ip) VALUES ('hacker', 'hash', -5, '127.0.0.1')")
             .execute(&pool)
             .await
@@ -665,9 +663,8 @@ mod tests {
 
         pool.close().await;
 
-        // Now it should correctly identify a broken database.
-        let err = ServerDataBaseBuilder::blocking_build(DataBaseLocation::Disk(db_path))
-            .unwrap_err();
+        let err =
+            ServerDataBaseBuilder::build(DataBaseLocation::Disk(db_path)).await.unwrap_err();
 
         assert!(
             matches!(err, DataBaseBuildError::ConstraintViolation(name) if name == "hacker"),
@@ -680,14 +677,14 @@ mod tests {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("bogus.db");
 
-        // Create an empty DB manually without the required tables.
-        let opts = SqliteConnectOptions::new().filename(&db_path).create_if_missing(true);
+        let opts = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(true);
         let pool = SqlitePoolOptions::new().connect_with(opts).await.unwrap();
         pool.close().await;
 
-        // Trying to load it will fail on the validation queries.
-        let err = ServerDataBaseBuilder::blocking_build(DataBaseLocation::Disk(db_path))
-            .unwrap_err();
+        let err =
+            ServerDataBaseBuilder::build(DataBaseLocation::Disk(db_path)).await.unwrap_err();
 
         assert!(
             matches!(err, DataBaseBuildError::Validation(_)),
@@ -700,10 +697,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("strict.db");
 
-        // Create a valid DB.
-        let _ = ServerDataBaseBuilder::blocking_build(DataBaseLocation::Disk(db_path.clone())).unwrap();
+        let _ =
+            ServerDataBaseBuilder::build(DataBaseLocation::Disk(db_path.clone())).await.unwrap();
 
-        // Inject an unexpected table.
         let opts = SqliteConnectOptions::new().filename(&db_path);
         let pool = SqlitePoolOptions::new().connect_with(opts).await.unwrap();
         sqlx::query("CREATE TABLE secret_backdoor (id INTEGER)")
@@ -712,9 +708,8 @@ mod tests {
             .unwrap();
         pool.close().await;
 
-        // Reloading the DB MUST fail because of strict table checking.
-        let err = ServerDataBaseBuilder::blocking_build(DataBaseLocation::Disk(db_path))
-            .unwrap_err();
+        let err =
+            ServerDataBaseBuilder::build(DataBaseLocation::Disk(db_path)).await.unwrap_err();
 
         assert!(
             matches!(err, DataBaseBuildError::UnexpectedTable(name) if name == "secret_backdoor"),

@@ -1,9 +1,23 @@
 //! Shared network protocol between the client and the server.
 
 use thiserror::Error;
-use wincode::{ReadResult, SchemaRead, SchemaWrite, WriteResult};
+use wincode::{ReadResult, WriteResult, SchemaRead, SchemaWrite};
 
 use crate::network_numbers::NetworkLongLong;
+
+/// Timestamp type wrapper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct Timestamp(u128);
+
+impl Timestamp {
+    pub fn from(n: u128) -> Self {
+        Self(n)
+    }
+    
+    pub fn get(&self) -> u128 {
+        self.0
+    }
+}
 
 /// Possible errors when a user try to log in.
 #[derive(Error, Debug, SchemaWrite, SchemaRead)]
@@ -36,7 +50,7 @@ pub enum SignInError {
 pub enum Request {
     Login(String, String),
     SignUp(String, String),
-    SignHash(String), // todo: change hash from String into a simple SignRequest(SomeHashType)
+    SignHash([u8; 32]),
     PurchaseTokens(NetworkLongLong),
     HowManyTokensDoIHave,
 }
@@ -50,7 +64,8 @@ pub enum Response {
     NotLoggedIn,
     TokenCount(NetworkLongLong),
     TokenAmountTooHigh(NetworkLongLong),
-    Token(String, u64), // token and signed_at. todo: change the types here too
+    Token { sign: Vec<u8>, timestamp: Timestamp },
+    OperationError(String),
 }
 
 macro_rules! impl_network_message {

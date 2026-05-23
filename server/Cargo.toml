@@ -4,14 +4,14 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-rustls = { version = "0.23.40", features = ["ring"] }
-tokio = { version = "1.52.3", features = ["rt-multi-thread", "net", "io-util", "macros", "signal"] }
-tokio-rustls = "0.26.4"
+rustls = { version = "0.23.40", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring"] }
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "net", "io-util", "time", "macros", "signal"] }
 rustls-pemfile = "2.2.0"
 serde = { version = "1", features = ["derive"] }
 toml = "1.1.2"
 thiserror = "2.0.18"
-rsa = { version = "0.9.10", features = ["pem"] }
+rsa = { version = "0.9.10", features = ["pem", "sha2"] }
 tokio-util = { version = "0.7.18", features = ["codec"] }
 futures = "0.3.32"
 shared_library = { path = "../shared_library" }
@@ -21,10 +21,15 @@ tracing = { version = "0.1", features = ["max_level_debug", "release_max_level_i
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2.5"
 argon2 = { version = "0.5.3", features = ["password-hash", "std", "rand"] }
-time = "0.3.47"
 wincode = "0.5.4"
 dashmap = "6.2.1"
 tempfile = "3.27.0"
+sha2 = { version = "0.11.0", features = ["oid"] }
+hex = "0.4.3"
+sntpc = { version = "0.10.1", features = ["std"] }
+sntpc-net-tokio = "1"
+clap = { version = "4.4", features = ["derive"] }
+anyhow = "1.0.102"
 
 # for testing
 [dev-dependencies]

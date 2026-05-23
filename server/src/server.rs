@@ -4,33 +4,52 @@ use rsa::RsaPrivateKey;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::ServerConfig;
 use std::io::ErrorKind;
-use std::net::SocketAddr;
+use std::net::{SocketAddr};
+use std::num::NonZero;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
-use time::OffsetDateTime;
 use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 use tracing_appender::non_blocking::WorkerGuard;
-
+use crate::time_oracle::{TimeOracleBundle, TimeSyncWorker};
 use crate::connection_handler::conn_handler;
 use crate::connection_handler::STSServerState;
 use crate::database::{DataBaseBuildError, DataBaseLocation, ServerDataBaseBuilder};
-
-/// Returns the current time in nanoseconds.
-#[inline(always)]
-pub fn time_now() -> i128 {
-    OffsetDateTime::now_utc().unix_timestamp_nanos()
-}
+use crate::server::NetworkPort::{AnyFreePort, Port};
 
 /// Where to write logs. For the moment, we support stdout and a filepath.
 pub enum LogDestination {
     Stdout,
     File { dir: PathBuf, filename: PathBuf },
+}
+
+/// Port configurations: can both be 0, which means to let the OS decide, or be more than it.
+#[derive(Debug)]
+pub enum NetworkPort {
+    AnyFreePort,
+    Port(NonZero<u16>),
+}
+
+/// Simple logic to handle ports.
+impl NetworkPort {
+    pub fn from(port: u16) -> Self {
+        match NonZero::new(port) {
+            None => AnyFreePort,
+            Some(p) => Port(p),
+        }
+    }
+
+    pub fn get(&self) -> u16 {
+        match self {
+            AnyFreePort => 0,
+            Port(p) => p.get(),
+        }
+    }
 }
 
 /// The Config structure is useful only for unprocessed configuration's data. For example,
@@ -39,6 +58,7 @@ pub struct ServerContext {
     address: SocketAddr,
     runtime_context: RuntimeContext,
     key_context: KeyContext,
+    time_oracle_bundle: TimeOracleBundle,
     log_output: LogDestination,
     database_location: DataBaseLocation,
 }
@@ -83,6 +103,7 @@ impl ServerContext {
         address: SocketAddr,
         runtime_context: RuntimeContext,
         key_context: KeyContext,
+        time_oracle_bundle: TimeOracleBundle,
         log_output: LogDestination,
         database_location: DataBaseLocation,
     ) -> Self {
@@ -90,6 +111,7 @@ impl ServerContext {
             address,
             runtime_context,
             key_context,
+            time_oracle_bundle,
             log_output,
             database_location,
         }
@@ -145,6 +167,7 @@ pub struct STSServer {
     runtime: Runtime,
     tls_acceptor: TlsAcceptor,
     state: STSServerState,
+    time_oracle_worker: Option<TimeSyncWorker>,
     _log_guard: WorkerGuard,
 }
 
@@ -163,6 +186,7 @@ impl STSServer {
                     tls_priv,
                     tss_priv,
                 },
+            time_oracle_bundle,
             log_output,
             database_location,
         }: ServerContext,
@@ -205,9 +229,11 @@ impl STSServer {
                 inner_rt
             }
         };
+
         if cryptography_threads > 0 {
             rt.max_blocking_threads(cryptography_threads);
         }
+
         let rt = rt
             .enable_all()
             .build()
@@ -220,9 +246,15 @@ impl STSServer {
 
         let tls_acceptor = TlsAcceptor::from(Arc::new(config));
 
-        let database = ServerDataBaseBuilder::blocking_build(database_location)?;
+        let database = rt.block_on(async {
+            ServerDataBaseBuilder::build(database_location).await
+        })?;
+
         let cancel_token = CancellationToken::new();
-        let state = STSServerState::from_bundle(database, &cancel_token, tss_priv);
+        let (time_oracle, worker) = time_oracle_bundle.into_parts();
+        let time_oracle_worker = Some(worker);
+
+        let state = STSServerState::from_bundle(database, &cancel_token, tss_priv, time_oracle);
 
         debug!("Server correctly built.");
 
@@ -231,15 +263,35 @@ impl STSServer {
             address,
             state,
             tls_acceptor,
+            time_oracle_worker,
             _log_guard,
         })
     }
 
-    pub fn run(&self) -> Result<(), STSServerRunError> {
+    pub fn run(mut self) -> Result<(), STSServerRunError> {
         let token_for_signal = self.state.clone_cancel_token();
         let token_for_run = self.state.clone_cancel_token();
+        let token_for_sync = self.state.clone_cancel_token();
+
+        let mut time_oracle_worker = self.time_oracle_worker.take();
 
         self.runtime.block_on(async {
+            if let Some(worker) = time_oracle_worker.take() {
+                tokio::spawn(async move {
+                    if let Err(e) = worker.start_syncing().await {
+                        error!("Fatal syncing error: {}. Interrupting the server.", e.to_string());
+                        token_for_sync.cancel();
+                    }
+                });
+
+            } else {
+                error!(
+                    "Assertion: worker was already taken, but this should be impossible. \
+                     Interrupting the server."
+                );
+                token_for_sync.cancel();
+            }
+
             tokio::spawn(async move {
                 if let Ok(()) = tokio::signal::ctrl_c().await {
                     info!("Detected interruption, sending cancel command to the tasks.");
@@ -263,9 +315,7 @@ impl STSServer {
                 ErrorKind::PermissionDenied => {
                     STSServerRunError::PermissionDenied(self.address.port())
                 }
-
                 ErrorKind::AddrNotAvailable => STSServerRunError::AddrNotAvailable(self.address),
-
                 _ => STSServerRunError::GenericBind(e.to_string()),
             })?;
 

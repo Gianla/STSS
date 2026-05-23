@@ -3,24 +3,27 @@
 
 use dashmap::DashSet;
 use futures::{SinkExt, StreamExt};
-use rsa::RsaPrivateKey;
+use rsa::{RsaPrivateKey, Pkcs1v15Sign};
 use shared_library::network_numbers::NetworkLongLong;
-use shared_library::protocol::{LoginError, Request, Response, SignInError};
+use shared_library::protocol::{LoginError, Request, Response, SignInError, Timestamp};
 use std::fmt::{Display, Formatter};
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::{UNIX_EPOCH};
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio_rustls::server::TlsStream;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{error, info, warn};
+use rsa::sha2::{Digest, Sha256};
 
 use crate::database::{
     AddTokensError, AuthenticationError, GetTokensError, InternalDataBaseError, RegistrationError,
     ServerDataBase, SubtractTokensError,
 };
+use crate::time_oracle::{TimeOracle};
 
 /// In order to access the state of the server by a lot of coroutines, we need to abstract it into
 /// a struct to create a shared reference with later.
@@ -32,6 +35,7 @@ pub struct STSServerState {
     cancel_token: CancellationToken,
     logged_users: Arc<DashSet<String>>,
     signing_key: Arc<RsaPrivateKey>,
+    time_oracle: TimeOracle,
 }
 
 impl STSServerState {
@@ -41,6 +45,7 @@ impl STSServerState {
         database: ServerDataBase,
         cancel_token: &CancellationToken,
         signing_key: RsaPrivateKey,
+        time_oracle: TimeOracle,
     ) -> Self {
         // It's also true that this violates the DIP, because someone might want to use another
         // type of smart pointer instead of Arc. In Rust, it's usually preferred to pass the
@@ -53,6 +58,7 @@ impl STSServerState {
             // lead to security problems.
             logged_users: Arc::new(DashSet::new()),
             signing_key: Arc::new(signing_key),
+            time_oracle,
         }
     }
 
@@ -63,6 +69,27 @@ impl STSServerState {
     pub fn clone_cancel_token(&self) -> CancellationToken {
         self.cancel_token.clone()
     }
+}
+
+/// Signs (hash || timestamp) using Sha256.
+#[inline(always)]
+pub fn generate_timestamp_signature(
+    signing_key: &Arc<RsaPrivateKey>,
+    hash_to_sign: &[u8; 32],
+    timestamp: Timestamp,
+) -> Result<Vec<u8>, rsa::Error> {
+    let mut hasher = Sha256::new();
+
+    hasher.update(hash_to_sign);
+
+    // .0 returns the first element of the timestamp, that is, the wrapped i128. .to_be_bytes(),
+    // then, returns it in big endian order.
+    hasher.update(timestamp.get().to_be_bytes());
+
+    let combined_hash: [u8; 32] = hasher.finalize().into();
+
+    let padding = Pkcs1v15Sign::new::<Sha256>();
+    signing_key.sign(padding, &combined_hash)
 }
 
 /// Used when successfully closing a connection with a client, either because it has been requested
@@ -108,6 +135,9 @@ pub enum CommunicationError {
     #[error("An error occurred while deserializing a request: {0}")]
     Deserialize(#[from] wincode::ReadError),
 
+    #[error("No connection")]
+    NetworkDown,
+
     #[error(transparent)]
     InternalDataBase(#[from] InternalDataBaseError),
 
@@ -115,9 +145,98 @@ pub enum CommunicationError {
     Framing(#[from] FramingError),
 }
 
-// Function conn_handler() and other functions called by it must remain
-// lightweight and non-intensive on the CPU; however, they can and should be I/O intensive
-// while leveraging the asynchronous programming pattern.
+/// Handles a send()'s error and log the proper error message. If the network is down, returns
+/// network_down_err in order to be furtherly forwarded upwards.
+fn send_error_logger<E>(
+    send_err: std::io::Error,
+    address: &SocketAddr,
+    network_down_err: E,
+) -> Result<(), E> {
+    match send_err.kind() {
+        ErrorKind::BrokenPipe => {
+            info!(
+                "Connection was unexpectedly closed while the server tried to send a \
+                 message to {}. Disconnecting.",
+                address,
+            );
+        }
+        ErrorKind::ConnectionReset => {
+            info!("Connection has been reset by {}. Closing the connection.", address);
+        }
+        ErrorKind::TimedOut => {
+            info!(
+                "Address {} has timed out while receiving a server's message. Disconnecting.",
+                address
+            );
+        }
+        ErrorKind::NetworkDown => {
+            return Err(network_down_err);
+        }
+        generic_error => {
+            warn!(
+                "Error while sending a message to the client: {}.",
+                generic_error
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Result given by the request fetcher from a framed stream.
+pub enum FetchResult<E> {
+    /// Data flow has closed successfully.
+    GracefulClose(ClosedStreamReason),
+    /// Network error or a parsing error.
+    Fatal(E),
+}
+
+/// Extracts the next request from a framed stream, properly adapting to the function's type
+/// ecosystem by the use of generics.
+pub async fn fetch_next_request<E, F>(
+    stream: &mut Framed<TlsStream<TcpStream>, LengthDelimitedCodec>,
+    cancel_token: &CancellationToken,
+    address: SocketAddr,
+    map_parsing_err: F,
+) -> Result<Request, FetchResult<E>>
+where
+    E: From<FramingError>,
+    F: FnOnce(wincode::ReadError) -> E,
+{
+    let framed_data = tokio::select! {
+        result = stream.next() => result,
+        _ = cancel_token.cancelled() => {
+            return Err(FetchResult::GracefulClose(ClosedStreamReason::InterruptReceived));
+        },
+    };
+
+    let result = match framed_data {
+        Some(res) => res,
+        None => {
+            return Err(FetchResult::GracefulClose(ClosedStreamReason::ClientAsked));
+        }
+    };
+
+    let raw_message = result.map_err(|e| {
+        let framing_err = match e.kind() {
+            ErrorKind::InvalidData => {
+                FramingError::SizeSmashing(address, stream.codec().max_frame_length())
+            }
+            _ => FramingError::Generic(address, e.to_string()),
+        };
+
+        FetchResult::Fatal(framing_err.into())
+    })?;
+
+    let request = Request::deserialize(raw_message)
+        .map_err(|e| FetchResult::Fatal(map_parsing_err(e)))?;
+
+    Ok(request)
+}
+
+// Function conn_handler() and other functions called by it must remain lightweight and
+// non-intensive on the CPU; however, they can and should be I/O intensive while leveraging the
+// asynchronous programming pattern.
 
 /// Main entry point for new incoming connections to the server.
 /// This function is "untrusted" because connected users are not logged in yet.
@@ -136,36 +255,21 @@ pub async fn conn_handler(
         database,
         cancel_token,
         logged_users,
-        signing_key: _signing_key, // this function won't and doesn't have to use the signing key.
+        signing_key: _signing_key, // This function won't and doesn't have to use the signing key.
+        time_oracle: _time_oracle, // Same.
     }: &STSServerState,
 ) -> Result<ClosedStreamReason, CommunicationError> {
     loop {
-        let framed_data = tokio::select! {
-            result = stream.next() => result,
-            _ = cancel_token.cancelled() => {
-                // Server has been interrupted while waiting for client's command. There's no
-                // pending operation in this case, therefore, we can end the connection.
-                break Ok(ClosedStreamReason::InterruptReceived);
-            },
+        let request = match fetch_next_request(
+            &mut stream,
+            cancel_token,
+            address,
+            |e| CommunicationError::Parsing(address, e.into()),
+        ).await {
+            Ok(req) => req,
+            Err(FetchResult::GracefulClose(reason)) => break Ok(reason),
+            Err(FetchResult::Fatal(err)) => return Err(err),
         };
-
-        let result = match framed_data {
-            Some(res) => res,
-            None => {
-                // stream has ended properly because the client asked so (they sent 0 bytes).
-                break Ok(ClosedStreamReason::ClientAsked);
-            }
-        };
-
-        let raw_message = result.map_err(|e| match e.kind() {
-            ErrorKind::InvalidData => {
-                FramingError::SizeSmashing(address, stream.codec().max_frame_length())
-            }
-            _ => FramingError::Generic(address, e.to_string()),
-        })?;
-
-        let request = Request::deserialize(raw_message)
-            .map_err(|e| CommunicationError::Parsing(address, e.into()))?;
 
         let mut started_session = None;
 
@@ -178,17 +282,24 @@ pub async fn conn_handler(
 
                 match result {
                     Ok(()) => {
-                        if logged_users.contains(&username) {
-                            Response::LoginFailed(LoginError::AlreadyLoggedIn)
-                        } else {
-                            logged_users.insert(username.clone());
+                        // .insert() returns true if the username has been successfully added
+                        // inside the hashmap. Furthermore, is atomic. This means that we don't
+                        // need to lock on it to perform a .contains() and then an .insert() if the
+                        // first was false. If this split operation wasn't locked, it would lead to
+                        // race conditions and security vulnerability (a user would have been able
+                        // to log twice).
+                        if logged_users.insert(username.clone()) {
                             started_session = Some(Session::bundle(address, username));
                             Response::Ok
+                        } else {
+                            Response::LoginFailed(LoginError::AlreadyLoggedIn)
                         }
                     }
 
                     Err(AuthenticationError::InternalDataBase(e)) => {
-                        return Err(CommunicationError::InternalDataBase(e))
+                        // This is an assertion error. An internal problem of the database is out
+                        // of the connection handler's responsibility, so we move it to the caller.
+                        return Err(CommunicationError::InternalDataBase(e));
                     }
 
                     Err(AuthenticationError::UserNotFound(_)) => {
@@ -202,11 +313,14 @@ pub async fn conn_handler(
             }
 
             Request::SignUp(username, password) => {
-                let result = database.try_register_user(username, password, address.ip()).await;
+                let result = database
+                    .try_register_user(username, password, address.ip())
+                    .await;
 
                 match result {
                     Ok(()) => Response::Ok,
                     Err(RegistrationError::InternalDataBase(e)) => {
+                        // Same as before (check above comments).
                         return Err(CommunicationError::InternalDataBase(e))
                     }
                     Err(RegistrationError::UserAlreadyExists(_user)) => {
@@ -215,18 +329,19 @@ pub async fn conn_handler(
                 }
             }
 
+            // To everything else, we have to answer that, at this stage, the user is not logged.
             _ => Response::NotLoggedIn,
         };
 
-        match stream.send(response.serialize()?).await {
-            Ok(_) => {}
-            Err(e) => {}
+        if let Err(send_err) = stream.send(response.serialize()?).await {
+            send_error_logger(send_err, &address, CommunicationError::NetworkDown)?;
         };
 
         if let Some(session) = started_session {
-            match session_handler(&session, &mut stream, state) {
+            match session_handler(&session, &mut stream, state).await {
                 _ => {}
             };
+            logged_users.remove(&session.username);
         }
     }
 }
@@ -238,8 +353,9 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn bundle(address: SocketAddr, username: String) -> Self {
-        Self { address, username }
+    /// Returns a new Session bundled from an address and a username.
+    pub fn bundle(address: SocketAddr, username: impl AsRef<str>) -> Self {
+        Self { address, username: username.as_ref().to_string() }
     }
 }
 
@@ -253,9 +369,6 @@ impl Display for Session {
 /// Errors that may arise during a trusted connection.
 #[derive(Error, Debug)]
 pub enum OperationalError {
-    #[error("the TCP, TLS or Framed stream produced an error: {0:?}")]
-    Communication(String),
-
     #[error("An error occurred while parsing a message from {0}: {1}")]
     Parsing(SocketAddr, #[source] ParsingError),
 
@@ -274,6 +387,12 @@ pub enum OperationalError {
     #[error(transparent)]
     SubtractTokens(#[from] SubtractTokensError),
 
+    #[error("No connection")]
+    NetworkDown,
+
+    #[error("Clock staggered")]
+    ClockStaggered,
+
     #[error(transparent)]
     InternalDataBase(#[from] InternalDataBaseError),
 
@@ -283,7 +402,7 @@ pub enum OperationalError {
 
 /// Used when successfully closing a session with a logged user.
 pub enum ClosedSessionReason {
-    // session can end for the exact same reasons as a non-logged-in connection may end.
+    // Session can end for the exact same reasons as a non-logged-in connection may end.
     ClosedStream(ClosedStreamReason),
 }
 
@@ -307,44 +426,29 @@ pub async fn session_handler(
     STSServerState {
         database,
         cancel_token,
-        logged_users,
+        logged_users: _logged_users, // No need to access to this inside a session_handler().
         signing_key,
+        time_oracle,
     }: &STSServerState,
 ) -> Result<ClosedSessionReason, OperationalError> {
     loop {
-        let framed_data = tokio::select! {
-            result = stream.next() => result,
-            _ = cancel_token.cancelled() => {
-                // Server has been interrupted while waiting for client's command. There's no
-                // pending operation in this case, therefore, we can end the connection.
-                break Ok(ClosedStreamReason::InterruptReceived.into());
-            },
+        let request = match fetch_next_request(
+            stream,
+            cancel_token,
+            session.address,
+            |e| OperationalError::Parsing(session.address, e.into()),
+        ).await {
+            Ok(req) => req,
+            Err(FetchResult::GracefulClose(reason)) => break Ok(reason.into()),
+            Err(FetchResult::Fatal(err)) => return Err(err),
         };
-
-        let result = match framed_data {
-            Some(res) => res,
-            None => {
-                // stream has ended properly because the client asked so (they sent 0 bytes).
-                break Ok(ClosedStreamReason::ClientAsked.into());
-            }
-        };
-
-        let raw_message = result.map_err(|e| match e.kind() {
-            ErrorKind::InvalidData => {
-                FramingError::SizeSmashing(session.address, stream.codec().max_frame_length())
-            }
-            _ => FramingError::Generic(session.address, e.to_string()),
-        })?;
-
-        let request = Request::deserialize(raw_message)
-            .map_err(|e| OperationalError::Parsing(session.address, e.into()))?;
 
         let response: Response = match request {
             // Let's not use "username" because it would shadow the outer variable.
             Request::Login(received_username, received_password) => {
                 info!(
                     "User {} tried to log in with username \"{}\" and password \"{}\", but they \
-                       were logged in before.",
+                     were logged in before.",
                     session, received_username, received_password
                 );
                 Response::LoginFailed(LoginError::AlreadyLoggedIn)
@@ -353,14 +457,36 @@ pub async fn session_handler(
             Request::SignUp(received_username, received_password) => {
                 info!(
                     "User {} tried to sign up with username \"{}\" and password \"{}\", but they \
-                       were logged in before.",
+                     were logged in before.",
                     session, received_username, received_password
                 );
                 Response::SignInFailed(SignInError::AlreadyLoggedIn)
             }
 
-            Request::SignHash(_) => {
-                unreachable!()
+            Request::SignHash(raw_hash) => {
+                let timestamp = match time_oracle.time_now().duration_since(UNIX_EPOCH) {
+                    Ok(ts) => Timestamp::from(ts.as_nanos()),
+                    Err(_) => return Err( OperationalError::ClockStaggered )
+                };
+
+                match generate_timestamp_signature(signing_key, &raw_hash, timestamp) {
+                    Ok(sign) => {
+                        info!(
+                            "User {} required to sign the hash {}.",
+                            address, hex::encode(raw_hash)
+                        );
+                        Response::Token { sign, timestamp }
+                    },
+                    Err(e) => {
+                        error!(
+                            "[Critical] An hashing operation returned an error: {}. \
+                             This should be impossible.", e.to_string()
+                        );
+                        Response::OperationError(
+                            "Error while performing the operation.".to_string()
+                        )
+                    }
+                }
             }
 
             Request::PurchaseTokens(be_tokens) => {
@@ -376,7 +502,7 @@ pub async fn session_handler(
                     Err(token_add_error) => match token_add_error {
                         AddTokensError::TokenOverflow => Response::TokenAmountTooHigh(be_tokens),
                         AddTokensError::UserDoesNotExist | AddTokensError::InternalDataBase(_) => {
-                            return Err(token_add_error.into())
+                            return Err(token_add_error.into());
                         }
                     },
                 }
@@ -398,9 +524,7 @@ pub async fn session_handler(
         };
 
         if let Err(send_err) = stream.send(response.serialize()?).await {
-            match send_err.kind() {
-                _ => todo!(),
-            }
+            send_error_logger(send_err, address, OperationalError::NetworkDown)?;
         };
     }
 }

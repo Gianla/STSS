@@ -5,11 +5,14 @@ use rsa::RsaPrivateKey;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::time::Duration;
 use thiserror::Error;
 
 use crate::database::DataBaseLocation;
-use crate::server::{KeyContext, LogDestination, RuntimeContext, ServerContext};
+use crate::server::{KeyContext, LogDestination, NetworkPort, RuntimeContext, ServerContext};
 use shared_library::safe_read::{safe_read, SafeReadError};
+use crate::time_oracle::{TimeOracle, TimeOracleError};
 
 const PEM_EXT: Option<&str> = Some("pem");
 const TOML_EXT: Option<&str> = Some("toml");
@@ -20,6 +23,7 @@ pub struct Config {
     network: NetworkConfig,
     runtime: RuntimeConfig,
     keys: KeysConfig,
+    time_oracle: TimeOracleConfig,
     log: Option<PathBuf>,
 }
 
@@ -28,12 +32,14 @@ impl Config {
         network: NetworkConfig,
         runtime: RuntimeConfig,
         keys: KeysConfig,
+        time_oracle: TimeOracleConfig,
         log: Option<PathBuf>,
     ) -> Self {
         Self {
             network,
             runtime,
             keys,
+            time_oracle,
             log,
         }
     }
@@ -42,9 +48,9 @@ impl Config {
 /// Network utils of the server.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct NetworkConfig {
-    ip: String, // stored in String type to be human-readable
-    port: u16,  /* serde will fail if encounters a number that requires more than 16 bits
-                 * to be represented */
+    ip: String, // Stored in String type to be human-readable.
+    port: u16,  // serde will fail if encounters a number that requires more than 16 bits
+                // to be represented.
 }
 
 impl NetworkConfig {
@@ -58,8 +64,8 @@ impl NetworkConfig {
 /// to perform heavy, cryptographical calculations.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RuntimeConfig {
-    working_threads: usize,      // threads destined to handle network connections
-    cryptography_threads: usize, // threads that will perform heavy calculations
+    working_threads: usize,      // Threads destined to handle network connections.
+    cryptography_threads: usize, // Threads that will perform heavy calculations.
 }
 
 impl RuntimeConfig {
@@ -96,6 +102,33 @@ impl KeysConfig {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct TimeOracleConfig {
+    ntp_server_host: String,
+    ntp_server_port: u16,
+    listener_ip: String,
+    listener_port: u16,
+    sync_interval_in_minutes: u16,
+}
+
+impl TimeOracleConfig {
+    pub fn new(
+        ntp_server_host: String,
+        ntp_server_port: u16,
+        listener_ip: String,
+        listener_port: u16,
+        sync_interval_in_minutes: u16,
+    ) -> Self {
+        Self {
+            ntp_server_host,
+            ntp_server_port,
+            listener_ip,
+            listener_port,
+            sync_interval_in_minutes,
+        }
+    }
+}
+
 /// Possible errors while reading the toml file.
 #[derive(Error, Debug)]
 pub enum ConfigError {
@@ -118,7 +151,7 @@ pub enum ServerConfigConversionError {
     #[error("failed to parse the TLS certificates: {0:?}")]
     CertificateParse(String),
 
-    #[error("Failed to parse the TLS private key: {0:?}")]
+    #[error("failed to parse the TLS private key: {0:?}")]
     TlsKeyParse(String),
 
     #[error("didn't find any TLS private key")]
@@ -131,10 +164,16 @@ pub enum ServerConfigConversionError {
     InvalidFileName,
 
     #[error(
-        "port has been set to zero: although this means to let the OS decide it, the Client \
-             won't have an efficient way to contact the server"
+        "port has been set to zero: although this means to let the OS decide it, the Client won't \
+         have an efficient way to contact the server"
     )]
     UnreliablePort,
+
+    #[error("expected a smaller amount of minutes")]
+    TooManyMinutes,
+    
+    #[error(transparent)]
+    TimeOracle(#[from] TimeOracleError),
 
     #[error(transparent)]
     SafeRead(#[from] SafeReadError),
@@ -146,8 +185,8 @@ impl Config {
         let raw_toml = String::from_utf8(safe_read(path, TOML_EXT)?)
             .map_err(|e| ConfigError::TomlNotInUtf8(e.to_string()))?;
 
-        let conf: Config =
-            toml::from_str(&raw_toml).map_err(|e| ConfigError::Parse(e.to_string()))?;
+        let conf: Config = toml::from_str(&raw_toml)
+            .map_err(|e| ConfigError::Parse(e.to_string()))?;
 
         Ok(conf)
     }
@@ -172,7 +211,7 @@ impl Config {
     }
 
     /// Converts all raw info into something usable by the server.
-    pub fn to_servercontext(self) -> Result<ServerContext, ServerConfigConversionError> {
+    pub fn to_server_context(self) -> Result<ServerContext, ServerConfigConversionError> {
         let ip = self
             .network
             .ip
@@ -183,9 +222,12 @@ impl Config {
             return Err(ServerConfigConversionError::UnreliablePort);
         }
 
+        let ntp_server_port = NetworkPort::from(self.time_oracle.ntp_server_port);
+
         let destination = match self.log {
             Some(path) => {
                 let parent = path.parent().unwrap_or(Path::new(""));
+                
                 let dir = if parent.as_os_str().is_empty() {
                     Path::new(".")
                 } else {
@@ -230,6 +272,26 @@ impl Config {
         let tss_priv = RsaPrivateKey::from_pkcs8_pem(&pem_str)
             .map_err(|e| ServerConfigConversionError::TssKeyParse(e.to_string()))?;
 
+        let time_oracle_ip: IpAddr = IpAddr::from_str(&self.time_oracle.listener_ip)
+            .map_err(|e| ServerConfigConversionError::IpParse(e.to_string()))?;
+
+        let time_oracle_address = SocketAddr::new(
+            time_oracle_ip,
+            self.time_oracle.listener_port
+        );
+
+        let interval_in_seconds = match self.time_oracle.sync_interval_in_minutes.checked_mul(60) {
+            None => return Err( ServerConfigConversionError::TooManyMinutes ),
+            Some(sync_interval) => sync_interval,
+        };
+
+        let time_oracle = TimeOracle::create_bundle(
+            self.time_oracle.ntp_server_host,
+            ntp_server_port,
+            time_oracle_address,
+            Duration::from_secs(interval_in_seconds as u64)
+        )?;
+
         Ok(ServerContext::new(
             SocketAddr::new(ip, self.network.port),
             RuntimeContext::new(
@@ -237,6 +299,7 @@ impl Config {
                 self.runtime.cryptography_threads,
             ),
             KeyContext::new(tls_certs, tls_priv, tss_priv),
+            time_oracle,
             destination,
             DataBaseLocation::Memory,
         ))
