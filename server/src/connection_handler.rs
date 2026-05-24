@@ -3,8 +3,7 @@
 
 use dashmap::DashSet;
 use futures::{SinkExt, StreamExt};
-use rsa::sha2::{Digest, Sha256};
-use rsa::{Pkcs1v15Sign, RsaPrivateKey};
+use rsa::RsaPrivateKey;
 use shared_library::network_numbers::NetworkLongLong;
 use shared_library::protocol::{LoginError, Request, Response, SignInError, Timestamp};
 use std::fmt::{Display, Formatter};
@@ -24,6 +23,7 @@ use crate::database::{
     AddTokensError, AuthenticationError, GetTokensError, InternalDataBaseError, RegistrationError,
     ServerDataBase, SubtractTokensError,
 };
+use crate::server::{ServerSigner, Signer};
 use crate::time_oracle::TimeOracle;
 
 /// In order to access the state of the server by a lot of coroutines, we need to abstract it into
@@ -37,6 +37,7 @@ pub struct STSServerState {
     logged_users: Arc<DashSet<String>>,
     signing_key: Arc<RsaPrivateKey>,
     time_oracle: TimeOracle,
+    signer: ServerSigner,
 }
 
 impl STSServerState {
@@ -47,6 +48,7 @@ impl STSServerState {
         cancel_token: &CancellationToken,
         signing_key: RsaPrivateKey,
         time_oracle: TimeOracle,
+        signer: ServerSigner,
     ) -> Self {
         // It's also true that this violates the DIP, because someone might want to use another
         // type of smart pointer instead of Arc. In Rust, it's usually preferred to pass the
@@ -60,6 +62,7 @@ impl STSServerState {
             logged_users: Arc::new(DashSet::new()),
             signing_key: Arc::new(signing_key),
             time_oracle,
+            signer,
         }
     }
 
@@ -70,27 +73,6 @@ impl STSServerState {
     pub fn clone_cancel_token(&self) -> CancellationToken {
         self.cancel_token.clone()
     }
-}
-
-/// Signs (hash || timestamp) using Sha256.
-#[inline(always)]
-fn generate_timestamp_signature(
-    signing_key: &Arc<RsaPrivateKey>,
-    hash_to_sign: &[u8; 32],
-    timestamp: Timestamp,
-) -> Result<Vec<u8>, rsa::Error> {
-    let mut hasher = Sha256::new();
-
-    hasher.update(hash_to_sign);
-
-    // .0 returns the first element of the timestamp, that is, the wrapped i128. .to_be_bytes(),
-    // then, returns it in big endian order.
-    hasher.update(timestamp.get().to_be_bytes());
-
-    let combined_hash: [u8; 32] = hasher.finalize().into();
-
-    let padding = Pkcs1v15Sign::new::<Sha256>();
-    signing_key.sign(padding, &combined_hash)
 }
 
 /// Used when successfully closing a connection with a client, either because it has been requested
@@ -280,6 +262,7 @@ async fn conn_handler_core<S>(
         logged_users,
         signing_key: _signing_key, // This function won't and doesn't have to use the signing key.
         time_oracle: _time_oracle, // Same.
+        signer: _signer,           // Same.
     }: &STSServerState,
 ) -> Result<ClosedStreamReason, CommunicationError>
 where
@@ -468,6 +451,7 @@ async fn session_handler<S>(
         logged_users: _logged_users, // No need to access to this inside a session_handler().
         signing_key,
         time_oracle,
+        signer,
     }: &STSServerState,
 ) -> Result<ClosedSessionReason, OperationalError>
 where
@@ -534,7 +518,10 @@ where
                         Err(_) => return Err(OperationalError::ClockStaggered),
                     };
 
-                    match generate_timestamp_signature(signing_key, &raw_hash, timestamp) {
+                    match signer
+                        .generate_timestamp_signature(signing_key, &raw_hash, timestamp)
+                        .await
+                    {
                         Ok(sign) => {
                             info!(
                                 "User {} required to sign the hash {}.",
@@ -654,8 +641,15 @@ mod tests {
         // Generate a fast, small key for testing to avoid slowing down the test suite
         let signing_key = RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap();
         let time_oracle = TimeOracle::dummy();
+        let dummy_signer = ServerSigner::dummy();
 
-        let state = STSServerState::from_bundle(database, &cancel_token, signing_key, time_oracle);
+        let state = STSServerState::from_bundle(
+            database,
+            &cancel_token,
+            signing_key,
+            time_oracle,
+            dummy_signer,
+        );
 
         let dummy_addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
         let state_clone = state.clone();
@@ -893,6 +887,7 @@ mod tests {
             &cancel_token,
             RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap(),
             TimeOracle::dummy(),
+            ServerSigner::dummy(),
         );
 
         let dummy_addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
@@ -952,6 +947,7 @@ mod tests {
             &cancel_token,
             RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap(),
             TimeOracle::dummy(),
+            ServerSigner::dummy(),
         );
 
         // Register the "victim" directly into the shared DB
@@ -1046,6 +1042,7 @@ mod tests {
             &cancel_token,
             RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap(),
             TimeOracle::dummy(),
+            ServerSigner::dummy(),
         );
 
         // Prepare the "poor_user" directly in the DB with EXACTLY 1 token

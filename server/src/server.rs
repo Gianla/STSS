@@ -5,9 +5,12 @@ use crate::connection_handler::{conn_handler, CommunicationError};
 use crate::database::{DataBaseBuildError, DataBaseLocation, ServerDataBaseBuilder};
 use crate::server::NetworkPort::{AnyFreePort, Port};
 use crate::time_oracle::{TimeOracleBundle, TimeSyncWorker};
-use rsa::RsaPrivateKey;
+use rsa::sha2::{Digest, Sha256};
+use rsa::{Pkcs1v15Sign, RsaPrivateKey};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::ServerConfig;
+use shared_library::protocol::Timestamp;
+use std::future::Future;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::num::NonZero;
@@ -16,6 +19,8 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
+use tokio::task;
+use tokio::task::JoinError;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tokio_util::sync::CancellationToken;
@@ -114,6 +119,123 @@ impl ServerContext {
             time_oracle_bundle,
             log_output,
             database_location,
+        }
+    }
+}
+
+/// Errors that might arise when signing with a signer.
+#[derive(Debug, Error)]
+pub enum SignError {
+    #[error(transparent)]
+    Crypto(#[from] rsa::Error),
+
+    #[error(transparent)]
+    ThreadPanic(#[from] JoinError),
+}
+
+/// A signer implements an RSA signature function.
+pub trait Signer {
+    fn generate_timestamp_signature(
+        &self,
+        signing_key: &Arc<RsaPrivateKey>,
+        hash_to_sign: &[u8; 32],
+        timestamp: Timestamp,
+    ) -> impl Future<Output = Result<Vec<u8>, SignError>> + Send;
+}
+
+/// Main function used to sign a hash.
+#[inline(always)]
+fn generate_timestamp_signature_core(
+    signing_key: &Arc<RsaPrivateKey>,
+    hash_to_sign: &[u8; 32],
+    timestamp: Timestamp,
+) -> Result<Vec<u8>, SignError> {
+    let mut hasher = Sha256::new();
+
+    hasher.update(hash_to_sign);
+    hasher.update(timestamp.get().to_be_bytes());
+
+    let combined_hash: [u8; 32] = hasher.finalize().into();
+    let padding = Pkcs1v15Sign::new::<Sha256>();
+
+    signing_key
+        .sign(padding, &combined_hash)
+        .map_err(SignError::Crypto)
+}
+
+/// The Accelerated Signer is used when the cryptography threads are zero, because the system
+/// supports hardware acceleration. For this reason, it simply wraps the signature function
+/// without other operations. Thanks to rust's zero-cost abstraction systems, this will be compiled
+/// down to a very cheap operation and the function will be inlined.
+#[derive(Clone)]
+pub struct AcceleratedSigner;
+
+impl Signer for AcceleratedSigner {
+    async fn generate_timestamp_signature(
+        &self,
+        signing_key: &Arc<RsaPrivateKey>,
+        hash_to_sign: &[u8; 32],
+        timestamp: Timestamp,
+    ) -> Result<Vec<u8>, SignError> {
+        generate_timestamp_signature_core(signing_key, hash_to_sign, timestamp)
+    }
+}
+
+/// The Slow Signer is used when the cryptography threads are more than zero, because the system
+/// does not support hardware acceleration. For this reason, it uses the current tokio runtime to
+/// spawn a blocking thread that performs the sign. Tokio will be configured to use a blocking
+/// threadpool if the configuration requires the use of SlowSigner.
+#[derive(Clone)]
+pub struct SlowSigner;
+
+impl Signer for SlowSigner {
+    async fn generate_timestamp_signature(
+        &self,
+        signing_key: &Arc<RsaPrivateKey>,
+        hash_to_sign: &[u8; 32],
+        timestamp: Timestamp,
+    ) -> Result<Vec<u8>, SignError> {
+        let key_clone = Arc::clone(signing_key);
+        let hash_copy = *hash_to_sign; // just copy it.
+
+        let task_result = task::spawn_blocking(move || {
+            generate_timestamp_signature_core(&key_clone, &hash_copy, timestamp)
+        })
+        .await;
+
+        task_result.map_err(|join_err| SignError::ThreadPanic(join_err))?
+    }
+}
+
+/// "Generic" signer.
+#[derive(Clone)]
+pub enum ServerSigner {
+    Accelerated(AcceleratedSigner),
+    Slow(SlowSigner),
+}
+
+impl ServerSigner {
+    pub fn dummy() -> Self {
+        Self::Accelerated(AcceleratedSigner {})
+    }
+}
+
+impl Signer for ServerSigner {
+    async fn generate_timestamp_signature(
+        &self,
+        signing_key: &Arc<RsaPrivateKey>,
+        hash_to_sign: &[u8; 32],
+        timestamp: Timestamp,
+    ) -> Result<Vec<u8>, SignError> {
+        match self {
+            ServerSigner::Accelerated(s) => {
+                s.generate_timestamp_signature(signing_key, hash_to_sign, timestamp)
+                    .await
+            }
+            ServerSigner::Slow(s) => {
+                s.generate_timestamp_signature(signing_key, hash_to_sign, timestamp)
+                    .await
+            }
         }
     }
 }
@@ -230,9 +352,20 @@ impl STSServer {
             }
         };
 
-        if cryptography_threads > 0 {
+        let signer = if cryptography_threads > 0 {
             rt.max_blocking_threads(cryptography_threads);
-        }
+            info!(
+                "Using a threadpool-based and slow signer of {} threads. This solution is better \
+                 if this system doesn't support hardware acceleration. If it is desired to use \
+                 the faster signer, please set the variable cryptography_threads in the \
+                 configuration file to be more than zero.",
+                cryptography_threads,
+            );
+            ServerSigner::Slow(SlowSigner)
+        } else {
+            debug!("Using an accelerated signer for cryptography operations.");
+            ServerSigner::Accelerated(AcceleratedSigner)
+        };
 
         let rt = rt
             .enable_all()
@@ -253,7 +386,8 @@ impl STSServer {
         let (time_oracle, worker) = time_oracle_bundle.into_parts();
         let time_oracle_worker = Some(worker);
 
-        let state = STSServerState::from_bundle(database, &cancel_token, tss_priv, time_oracle);
+        let state =
+            STSServerState::from_bundle(database, &cancel_token, tss_priv, time_oracle, signer);
 
         debug!("Server correctly built.");
 
@@ -324,10 +458,11 @@ impl STSServer {
             "Address {} bounded, listening for incoming connections.",
             self.address
         );
+
         let mut _unanswered_syn_count: u64 = 0;
 
         loop {
-            // here lays the server hotpath.
+            // Here lays the server hotpath.
             let accept_result = tokio::select! {
                 res = listener.accept() => res,
                 _ = cancel_token.cancelled() => break,
@@ -338,7 +473,7 @@ impl STSServer {
                 Err(e) => {
                     match e.kind() {
                         ErrorKind::ConnectionAborted => {
-                            // maybe this variable can be used in some network management
+                            // Maybe this variable can be used in some network management
                             // operation, but it's not our priority right now.
                             let _ = _unanswered_syn_count.checked_add(1);
                             continue;
@@ -348,7 +483,7 @@ impl STSServer {
                 }
             };
 
-            // thanks to rust's abstraction systems, we can implement a zero-cost copy. Arc is
+            // Thanks to rust's abstraction systems, we can implement a zero-cost copy. Arc is
             // just a smart pointer that increments its counter each time a clone is made:
             // real data is never cloned, keeping the hot path clear from memory-intensive
             // operations.
@@ -359,7 +494,7 @@ impl STSServer {
             let tls_acceptor_clone = self.tls_acceptor.clone();
 
             tokio::spawn(async move {
-                // wrapping the newbie stream into a tls_stream will perform the TLS handshake.
+                // Wrapping the newbie stream into a tls_stream will perform the TLS handshake.
                 // The TLS acceptor is interpreted as the server-side of the handshake, where we
                 // loaded certificates and configurations before.
                 let tls_stream =
