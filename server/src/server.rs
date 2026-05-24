@@ -1,7 +1,7 @@
 //! Contains the main component for the server, with network and cryptography utilities.
 
-use crate::connection_handler::STSServerState;
-use crate::connection_handler::{conn_handler, CommunicationError};
+use crate::connection_handler::conn_handler;
+use crate::connection_handler::{HandlerError, NetworkError, ParsingError, STSServerState};
 use crate::database::{DataBaseBuildError, DataBaseLocation, ServerDataBaseBuilder};
 use crate::server::NetworkPort::{AnyFreePort, Port};
 use crate::time_oracle::{TimeOracleBundle, TimeSyncWorker};
@@ -24,7 +24,7 @@ use tokio::task::JoinError;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use tracing_appender::non_blocking::WorkerGuard;
 
 /// Where to write logs. For the moment, we support stdout and a filepath.
@@ -203,7 +203,7 @@ impl Signer for SlowSigner {
         })
         .await;
 
-        task_result.map_err(|join_err| SignError::ThreadPanic(join_err))?
+        task_result.map_err(SignError::ThreadPanic)?
     }
 }
 
@@ -463,9 +463,11 @@ impl STSServer {
 
         loop {
             // Here lays the server hotpath.
+            let task_cancel_token = cancel_token.clone();
+
             let accept_result = tokio::select! {
                 res = listener.accept() => res,
-                _ = cancel_token.cancelled() => break,
+                _ = task_cancel_token.cancelled() => break,
             };
 
             let (stream, new_address) = match accept_result {
@@ -522,33 +524,78 @@ impl STSServer {
                     new_address
                 );
 
-                // pass the correct, encrypted and framed stream to the main connection manager.
+                // Pass the correct, encrypted and framed stream to the main connection manager.
                 if let Err(e) = conn_handler(new_address, framed_stream, &state_clone).await {
                     match e {
-                        // todo
-                        CommunicationError::Operational(_, _) => {}
-                        CommunicationError::Parsing(_, _) => {}
-                        CommunicationError::Serialize(_) => {}
-                        CommunicationError::Deserialize(_) => {}
-                        CommunicationError::NetworkDown => {}
-                        CommunicationError::InternalDataBase(_) => {}
-                        CommunicationError::Framing(_) => {}
-                    }
-                };
-                /*
-                match frame_error.kind() {
-                    ErrorKind::InvalidData => {
-                        warn!("Address {} isn't respecting the protocol: they declared that a huge \
-                               amount of data (more than {}) is coming. Either the user is not \
-                               respecting the protocol, or it has malicious intentions. \
-                               Disconnecting.", address, stream.codec().max_frame_length());
-                    }
-                    _ => {
-                        info!("Problem with address {} while extracting the message from the \
-                               stream: {}.", address, frame_error.to_string())
+                        HandlerError::Domain { username, source } => {
+                            // Determine if the user was logged in or if they were still a guest
+                            let user_context =
+                                username.unwrap_or_else(|| "[Not Logged]".to_string());
+
+                            error!(
+                                "A serious issue was reported for user '{}': {}. \
+                                 Potentially, this can lead to problems with all the other current \
+                                 sessions. This one has been closed, but expect others to do so \
+                                 too.",
+                                user_context, source
+                            );
+                        }
+
+                        HandlerError::Network(network_err) => match network_err {
+                            NetworkError::ConnectionDropped => {
+                                info!("{} disconnected.", new_address);
+                            }
+
+                            NetworkError::ServerNetworkDown => {
+                                error!(
+                                    "[CRITICAL] Server's local network interface is down. \
+                                     Shutting the server."
+                                );
+                                task_cancel_token.clone().cancel();
+                            }
+
+                            NetworkError::Framing { address, source } => {
+                                warn!(
+                                    "Framing error with {}: {}. Probably, a huge incoming \
+                                     amount of data has been detected (likely a DOS attack) \
+                                     and the message has been refused. Connection closed.",
+                                    address, source
+                                );
+                            }
+
+                            NetworkError::Parsing(parsing_err) => match parsing_err {
+                                ParsingError::Serialize(error) => {
+                                    error!(
+                                        "Error while serializing a response to send to a \
+                                         client: {}. Likely, this will happen for all this \
+                                         kind of responses, for all sessions. This \
+                                         connection has been closed, but expect others to \
+                                         do so too.",
+                                        error,
+                                    )
+                                }
+
+                                ParsingError::Deserialize(error) => {
+                                    warn!(
+                                        "Protocol parsing/serialization error with {}: {}. \
+                                         The client might not be respecting the protocol \
+                                         or sent an unrecognized pattern. Connection \
+                                         closed.",
+                                        new_address, error
+                                    );
+                                }
+                            },
+
+                            NetworkError::Generic(io_err) => {
+                                error!(
+                                    "Generic network error from address {}: {}. Connection \
+                                     closed.",
+                                    new_address, io_err
+                                );
+                            }
+                        },
                     }
                 }
-                */
 
                 // tokio cannot infer types properly, so we must help it with a turbofish operator.
                 Ok::<(), std::io::Error>(())

@@ -23,7 +23,7 @@ use crate::database::{
     AddTokensError, AuthenticationError, GetTokensError, InternalDataBaseError, RegistrationError,
     ServerDataBase, SubtractTokensError,
 };
-use crate::server::{ServerSigner, Signer};
+use crate::server::{ServerSigner, SignError, Signer};
 use crate::time_oracle::TimeOracle;
 
 /// In order to access the state of the server by a lot of coroutines, we need to abstract it into
@@ -86,13 +86,11 @@ pub enum ClosedStreamReason {
 #[derive(Error, Debug)]
 pub enum FramingError {
     #[error(
-        "Address {0} isn't respecting the protocol: they declared that a huge amount of data \
-             (more than {1}) is coming. Either the user is not respecting the protocol, or it has \
-             malicious intentions. Disconnecting."
+        "error with {0}: a huge amount of data (more than {1}) is coming and that can't be handled"
     )]
     SizeSmashing(SocketAddr, usize),
 
-    #[error("An error occurred while framing the communication with {0}: {1}.")]
+    #[error("error while framing the communication with {0}: {1}.")]
     Generic(SocketAddr, String),
 }
 
@@ -106,104 +104,109 @@ pub enum ParsingError {
     Deserialize(#[from] wincode::ReadError),
 }
 
-/// Possible errors that may happen when communicating with a client.
+/// Errors that indicate a physical or structural failure in the network connection.
+/// These errors are fatal for the specific socket and must break the connection loop.
 #[derive(Error, Debug)]
-pub enum CommunicationError {
-    #[error("Error from user {0}: {1}")]
-    Operational(String, String),
+pub enum NetworkError {
+    #[error("connection abruptly dropped by the client or broken pipe")]
+    ConnectionDropped,
 
-    #[error("An error occurred while parsing a message from {0}: {1}.")]
-    Parsing(SocketAddr, #[source] ParsingError),
-
-    #[error("An error occurred while serializing a response: {0}")]
-    Serialize(#[from] wincode::WriteError),
-
-    #[error("An error occurred while deserializing a request: {0}")]
-    Deserialize(#[from] wincode::ReadError),
-
-    #[error("No connection")]
-    NetworkDown,
+    #[error("no connection")]
+    ServerNetworkDown,
 
     #[error(transparent)]
-    InternalDataBase(#[from] InternalDataBaseError),
+    Generic(#[from] std::io::Error),
 
-    #[error(transparent)]
-    Framing(#[from] FramingError),
+    #[error("framing error with address {0:?}: {source}", address)]
+    Framing {
+        address: SocketAddr,
+        #[source]
+        source: FramingError,
+    },
+
+    #[error("wincode parsing error: {0}")]
+    Parsing(#[from] ParsingError),
+}
+
+/// Errors related to the business logic and application state.
+#[derive(Error, Debug)]
+pub enum InternalError {
+    #[error("internal database error occurred")]
+    Database(#[from] InternalDataBaseError),
+
+    #[error("user does not exist or was deleted during session")]
+    UserNotFound,
+
+    #[error("system clock is out of sync")]
+    ClockStaggered,
+
+    #[error("data integrity violation: {0}")]
+    IntegrityViolation(String),
+}
+
+/// The overarching error type for the connection/session handlers.
+#[derive(Error, Debug)]
+pub enum HandlerError {
+    #[error("network failure: {0}")]
+    Network(#[from] NetworkError),
+
+    #[error("fatal domain error (user: {username:?}): {source}")]
+    Domain {
+        username: Option<String>, // "None" if the user wasn't logged in yet
+        #[source]
+        source: InternalError,
+    },
 }
 
 /// Handles a send()'s error and log the proper error message. If the network is down, returns
 /// network_down_err in order to be furtherly forwarded upwards.
-fn send_error_logger<E>(
-    send_err: std::io::Error,
-    address: &SocketAddr,
-    network_down_err: E,
-) -> Result<(), E> {
+fn send_error_logger(send_err: std::io::Error, address: &SocketAddr) -> Result<(), NetworkError> {
     match send_err.kind() {
-        ErrorKind::BrokenPipe => {
-            info!(
-                "Connection was unexpectedly closed while the server tried to send a \
-                 message to {}. Disconnecting.",
-                address,
-            );
-        }
-        ErrorKind::ConnectionReset => {
-            info!(
-                "Connection has been reset by {}. Closing the connection.",
-                address
-            );
+        ErrorKind::BrokenPipe | ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted => {
+            info!("Connection dropped by {}. Disconnecting.", address);
+            Err(NetworkError::ConnectionDropped)
         }
         ErrorKind::TimedOut => {
-            info!(
-                "Address {} has timed out while receiving a server's message. Disconnecting.",
-                address
-            );
+            info!("Address {} has timed out. Disconnecting.", address);
+            Err(NetworkError::ConnectionDropped)
         }
         ErrorKind::NetworkDown => {
-            return Err(network_down_err);
+            error!("[CRITICAL] Server's local network interface is down.");
+            Err(NetworkError::ServerNetworkDown)
         }
         generic_error => {
             warn!(
-                "Error while sending a message to the client: {}.",
-                generic_error
+                "An error occurred while sending a message to {}: {}.",
+                address, generic_error
             );
+            Err(NetworkError::Generic(send_err))
         }
     }
-
-    Ok(())
-}
-
-/// Result given by the request fetcher from a framed stream.
-pub enum FetchResult<E> {
-    /// Data flow has closed successfully.
-    GracefulClose(ClosedStreamReason),
-    /// Network error or a parsing error.
-    Fatal(E),
 }
 
 /// Extracts the next request from a framed stream, properly adapting to the function's type
 /// ecosystem by the use of generics.
-async fn fetch_next_request<S, E, F>(
+async fn fetch_next_request<S>(
     stream: &mut Framed<S, LengthDelimitedCodec>,
     cancel_token: &CancellationToken,
     address: SocketAddr,
-    map_parsing_err: F,
-) -> Result<Request, FetchResult<E>>
+) -> Result<Option<Request>, NetworkError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
-    E: From<FramingError>,
-    F: FnOnce(wincode::ReadError) -> E,
 {
     let framed_data = tokio::select! {
         result = stream.next() => result,
         _ = cancel_token.cancelled() => {
-            return Err(FetchResult::GracefulClose(ClosedStreamReason::InterruptReceived));
+            // Server interrupted gracefully
+            return Ok(None);
         },
     };
 
     let result = match framed_data {
         Some(res) => res,
         None => {
-            return Err(FetchResult::GracefulClose(ClosedStreamReason::ClientAsked));
+            // Client closed the connection gracefully
+            return Ok(None);
         }
     };
 
@@ -214,14 +217,16 @@ where
             }
             _ => FramingError::Generic(address, e.to_string()),
         };
-
-        FetchResult::Fatal(framing_err.into())
+        NetworkError::Framing {
+            address,
+            source: framing_err,
+        }
     })?;
 
-    let request =
-        Request::deserialize(raw_message).map_err(|e| FetchResult::Fatal(map_parsing_err(e)))?;
+    // The ? operator automatically converts ParsingError into NetworkError::Parsing
+    let request = Request::deserialize(raw_message).map_err(ParsingError::from)?;
 
-    Ok(request)
+    Ok(Some(request))
 }
 
 // Function conn_handler() and other functions called by it must remain lightweight and
@@ -242,7 +247,7 @@ pub async fn conn_handler(
     address: SocketAddr,
     stream: Framed<TlsStream<TcpStream>, LengthDelimitedCodec>,
     state: &STSServerState,
-) -> Result<ClosedStreamReason, CommunicationError> {
+) -> Result<ClosedStreamReason, HandlerError> {
     conn_handler_core(address, stream, state).await
 }
 
@@ -264,19 +269,21 @@ async fn conn_handler_core<S>(
         time_oracle: _time_oracle, // Same.
         signer: _signer,           // Same.
     }: &STSServerState,
-) -> Result<ClosedStreamReason, CommunicationError>
+) -> Result<ClosedStreamReason, HandlerError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     loop {
-        let request = match fetch_next_request(&mut stream, cancel_token, address, |e| {
-            CommunicationError::Parsing(address, e.into())
-        })
-        .await
-        {
-            Ok(req) => req,
-            Err(FetchResult::GracefulClose(reason)) => break Ok(reason),
-            Err(FetchResult::Fatal(err)) => return Err(err),
+        let request = match fetch_next_request(&mut stream, cancel_token, address).await? {
+            Some(req) => req,
+            None => {
+                let reason = if cancel_token.is_cancelled() {
+                    ClosedStreamReason::InterruptReceived
+                } else {
+                    ClosedStreamReason::ClientAsked
+                };
+                break Ok(reason);
+            }
         };
 
         let mut started_session = None;
@@ -304,12 +311,6 @@ where
                         }
                     }
 
-                    Err(AuthenticationError::InternalDataBase(e)) => {
-                        // This is an assertion error. An internal problem of the database is out
-                        // of the connection handler's responsibility, so we move it to the caller.
-                        return Err(CommunicationError::InternalDataBase(e));
-                    }
-
                     Err(AuthenticationError::UserNotFound(_)) => {
                         info!("{} tried to log in with a non-existent username.", &address);
                         Response::LoginFailed(LoginError::InvalidCredentials)
@@ -323,6 +324,15 @@ where
                         );
                         Response::LoginFailed(LoginError::InvalidCredentials)
                     }
+
+                    Err(AuthenticationError::InternalDataBase(e)) => {
+                        // This is an assertion error. An internal problem of the database is out
+                        // of the connection handler's responsibility, so we move it to the caller.
+                        return Err(HandlerError::Domain {
+                            username: None, // The user is not logged in yet
+                            source: InternalError::Database(e),
+                        });
+                    }
                 }
             }
 
@@ -333,10 +343,14 @@ where
 
                 match result {
                     Ok(()) => Response::Ok,
+
                     Err(RegistrationError::InternalDataBase(e)) => {
-                        // Same as before (check above comments).
-                        return Err(CommunicationError::InternalDataBase(e));
+                        return Err(HandlerError::Domain {
+                            username: None, // The user is not logged in yet
+                            source: InternalError::Database(e),
+                        });
                     }
+
                     Err(RegistrationError::UserAlreadyExists(_user)) => {
                         Response::SignInFailed(SignInError::UsernameAlreadyTaken)
                     }
@@ -347,38 +361,41 @@ where
             _ => Response::NotLoggedIn,
         };
 
-        if let Err(send_err) = stream.send(response.serialize()?).await {
-            send_error_logger(send_err, &address, CommunicationError::NetworkDown)?;
+        let serialized_response = response
+            .serialize()
+            .map_err(|e| HandlerError::Network(NetworkError::Parsing(e.into())))?;
+
+        if let Err(send_err) = stream.send(serialized_response).await {
+            send_error_logger(send_err, &address)?;
         };
 
         if let Some(session) = started_session {
             match session_handler(&session, &mut stream, state).await {
                 Err(error) => {
-                    return Err(CommunicationError::Operational(
-                        session.username.clone(),
-                        error.to_string(),
-                    ))
+                    // Propagate the error, but make sure to unlock the username first!
+                    state.logged_users.remove(&session.username);
+                    return Err(error);
                 }
-                Ok(closed_reason) => {
-                    let reason = match closed_reason {
-                        ClosedSessionReason::ClosedStream(r) => match r {
-                            ClosedStreamReason::InterruptReceived => "server interruption",
-                            ClosedStreamReason::ClientAsked => "client asked",
-                        },
-                        ClosedSessionReason::LoggedOut => "logged out",
-                    };
-                    info!(
-                        "User {} is disconnected from logged connection, reason: {}",
-                        reason, &session,
-                    )
+
+                Ok(ClosedSessionReason::LoggedOut) => {
+                    info!("User {} logged out.", session);
+                    state.logged_users.remove(&session.username);
+                    // Do nothing else: the loop continues and they can log in again.
+                }
+
+                Ok(ClosedSessionReason::ClosedStream(reason)) => {
+                    info!("User {} disconnected.", session);
+                    state.logged_users.remove(&session.username);
+                    // Break the loop: the stream is dead or the server is shutting down.
+                    return Ok(reason);
                 }
             }
-            logged_users.remove(&session.username);
         }
     }
 }
 
 /// Groups up the data of a single, complete and logged connection.
+#[derive(Debug)]
 pub struct Session {
     address: SocketAddr,
     username: String,
@@ -399,24 +416,6 @@ impl Display for Session {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}@{}", self.username, self.address)
     }
-}
-
-#[derive(Error, Debug)]
-pub enum OperationalError {
-    #[error(transparent)]
-    Communication(#[from] CommunicationError),
-
-    #[error(transparent)]
-    GetTokens(#[from] GetTokensError),
-
-    #[error(transparent)]
-    AddTokens(#[from] AddTokensError),
-
-    #[error(transparent)]
-    SubtractTokens(#[from] SubtractTokensError),
-
-    #[error("Clock staggered")]
-    ClockStaggered,
 }
 
 /// Used when successfully closing a session with a logged user.
@@ -448,24 +447,26 @@ async fn session_handler<S>(
     STSServerState {
         database,
         cancel_token,
-        logged_users: _logged_users, // No need to access to this inside a session_handler().
+        logged_users: _logged_users, // No need to access to this inside session_handler().
         signing_key,
         time_oracle,
         signer,
     }: &STSServerState,
-) -> Result<ClosedSessionReason, OperationalError>
+) -> Result<ClosedSessionReason, HandlerError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     loop {
-        let request = match fetch_next_request(stream, cancel_token, session.address, |e| {
-            CommunicationError::Parsing(session.address, e.into())
-        })
-        .await
-        {
-            Ok(req) => req,
-            Err(FetchResult::GracefulClose(reason)) => break Ok(reason.into()),
-            Err(FetchResult::Fatal(err)) => return Err(OperationalError::from(err)),
+        let request = match fetch_next_request(stream, cancel_token, *address).await? {
+            Some(req) => req,
+            None => {
+                let reason = if cancel_token.is_cancelled() {
+                    ClosedStreamReason::InterruptReceived
+                } else {
+                    ClosedStreamReason::ClientAsked
+                };
+                break Ok(reason.into());
+            }
         };
 
         let mut has_to_logout = false;
@@ -504,18 +505,33 @@ where
                             // to sign a hash, but they have no tokens.
                             Response::NotEnoughTokens
                         }
-                        // Both of these are assertion errors. The user MUST exist in the
-                        // database if they're logged in. So we return the responsibility
-                        // to the caller.
-                        SubtractTokensError::UserDoesNotExist
-                        | SubtractTokensError::InternalDataBase(_) => {
-                            return Err(OperationalError::from(e))
+
+                        SubtractTokensError::UserDoesNotExist => {
+                            // Assertion error. The user MUST exist in the database if they're
+                            // logged in. So we return the responsibility to the caller.
+                            return Err(HandlerError::Domain {
+                                username: Some(session.username.clone()),
+                                source: InternalError::UserNotFound,
+                            });
+                        }
+
+                        SubtractTokensError::InternalDataBase(e) => {
+                            return Err(HandlerError::Domain {
+                                username: Some(session.username.clone()),
+                                source: InternalError::Database(e),
+                            });
                         }
                     }
                 } else {
+                    // if token subtraction was successful...
                     let timestamp = match time_oracle.time_now().duration_since(UNIX_EPOCH) {
                         Ok(ts) => Timestamp::from(ts.as_nanos()),
-                        Err(_) => return Err(OperationalError::ClockStaggered),
+                        Err(_) => {
+                            return Err(HandlerError::Domain {
+                                username: Some(session.username.clone()),
+                                source: InternalError::ClockStaggered,
+                            })
+                        }
                     };
 
                     match signer
@@ -530,20 +546,31 @@ where
                             );
                             Response::Token { sign, timestamp }
                         }
-                        Err(e) => {
-                            error!(
-                                "[Critical] An hashing operation returned an error: {}. \
-                                 This should be impossible.",
-                                e.to_string()
-                            );
+
+                        Err(sign_err) => {
+                            match sign_err {
+                                SignError::Crypto(_) => error!(
+                                    "[Critical] An hashing operation returned an error: {}. \
+                                     This should be impossible and thus a serious issue, \
+                                     please consider restarting the server.",
+                                    sign_err.to_string()
+                                ),
+
+                                SignError::ThreadPanic(_) => error!(
+                                    "[Critical] Using a new thread caused an error: {}. This \
+                                     is a serious issue, please consider restarting the \
+                                     server.",
+                                    sign_err.to_string()
+                                ),
+                            }
 
                             if let Err(refund_err) = database.add_user_tokens(username, 1).await {
                                 // We at least log this. If the hash operation fails, and the
                                 // database operation fails too, an operator has to manually
                                 // rollback this.
                                 error!(
-                                    "Failed to refund 1 token to user {} after a signing failure: \
-                                     {:?}",
+                                    "Failed to refund 1 token to user {} after a signing \
+                                    failure: {:?}",
                                     username, refund_err
                                 );
                             }
@@ -566,36 +593,63 @@ where
                         // send a stronger confirmation that its tokens have been updated.
                         Response::TokenCount(NetworkLongLong::from(new_token_count))
                     }
+
                     Err(token_add_error) => match token_add_error {
                         AddTokensError::TokenOverflow => Response::TokenAmountTooHigh(be_tokens),
-                        AddTokensError::UserDoesNotExist | AddTokensError::InternalDataBase(_) => {
-                            return Err(token_add_error.into());
+                        AddTokensError::UserDoesNotExist => {
+                            return Err(HandlerError::Domain {
+                                username: Some(session.username.clone()),
+                                source: InternalError::UserNotFound,
+                            });
+                        }
+                        AddTokensError::InternalDataBase(e) => {
+                            return Err(HandlerError::Domain {
+                                username: Some(session.username.clone()),
+                                source: InternalError::Database(e),
+                            });
                         }
                     },
                 }
             }
 
-            Request::HowManyTokensDoIHave => {
-                match database.get_user_tokens(&username).await {
-                    Ok(n_tokens) => {
-                        info!("{} requested their tokens: {}.", username, n_tokens);
-                        Response::TokenCount(NetworkLongLong::from(n_tokens))
-                    }
-                    Err(get_tokens_error) => {
-                        // get_user_tokens() fails only when integrity is violated. This case does
-                        // not have to be handled by the connection handlers, but by the server.
-                        return Err(get_tokens_error.into());
-                    }
+            Request::HowManyTokensDoIHave => match database.get_user_tokens(&username).await {
+                Ok(n_tokens) => {
+                    info!("{} requested their tokens: {}.", username, n_tokens);
+                    Response::TokenCount(NetworkLongLong::from(n_tokens))
                 }
-            }
+
+                Err(GetTokensError::UserDoesNotExist) => {
+                    return Err(HandlerError::Domain {
+                        username: Some(session.username.clone()),
+                        source: InternalError::UserNotFound,
+                    });
+                }
+
+                Err(GetTokensError::TokenIntegrityCheckViolated(user, amount)) => {
+                    return Err(HandlerError::Domain {
+                        username: Some(session.username.clone()),
+                        source: InternalError::IntegrityViolation(format!(
+                            "invalid token amount for user {}: {}",
+                            user, amount
+                        )),
+                    });
+                }
+
+                Err(GetTokensError::InternalDataBase(e)) => {
+                    return Err(HandlerError::Domain {
+                        username: Some(session.username.clone()),
+                        source: InternalError::Database(e),
+                    });
+                }
+            },
         };
 
         let serialized_response = response
             .serialize()
-            .map_err(CommunicationError::Serialize)?;
+            .map_err(|e| HandlerError::Network(NetworkError::Parsing(e.into())))?;
 
         if let Err(send_err) = stream.send(serialized_response).await {
-            send_error_logger(send_err, address, CommunicationError::NetworkDown)?;
+            send_error_logger(send_err, address)?;
         };
 
         if has_to_logout {
