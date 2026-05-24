@@ -504,6 +504,7 @@ mod tests {
         assert!(reg_result.is_ok(), "Registration should succeed");
 
         let auth_result = db.verify_user_password(user, password).await;
+
         assert!(
             auth_result.is_ok(),
             "Authentication should succeed with correct password"
@@ -519,6 +520,7 @@ mod tests {
         db.try_register_user(user, "pass", ip).await.unwrap();
 
         let err = db.try_register_user(user, "pass", ip).await.unwrap_err();
+
         assert!(
             matches!(err, RegistrationError::UserAlreadyExists(_)),
             "Expected UserAlreadyExists error"
@@ -532,6 +534,7 @@ mod tests {
         let ip = IpAddr::from_str("127.0.0.1").unwrap();
 
         let err = db.verify_user_password("ghost", "pass").await.unwrap_err();
+
         assert!(
             matches!(err, AuthenticationError::UserNotFound(_)),
             "Expected UserNotFound error for non-existent user"
@@ -540,10 +543,12 @@ mod tests {
         db.try_register_user(user, "correct_pass", ip)
             .await
             .unwrap();
+
         let err = db
             .verify_user_password(user, "wrong_pass")
             .await
             .unwrap_err();
+
         assert!(
             matches!(err, AuthenticationError::InvalidPassword),
             "Expected InvalidPassword error"
@@ -579,6 +584,7 @@ mod tests {
         db.add_user_tokens(user, 10).await.unwrap();
 
         let err = db.subtract_user_tokens(user, 15).await.unwrap_err();
+
         assert!(
             matches!(err, SubtractTokensError::InsufficientTokens),
             "Expected InsufficientTokens error"
@@ -634,6 +640,7 @@ mod tests {
         let opts = SqliteConnectOptions::new()
             .filename(&db_path)
             .create_if_missing(true);
+
         let pool = SqlitePoolOptions::new().connect_with(opts).await.unwrap();
 
         sqlx::query(
@@ -679,6 +686,7 @@ mod tests {
         let opts = SqliteConnectOptions::new()
             .filename(&db_path)
             .create_if_missing(true);
+
         let pool = SqlitePoolOptions::new().connect_with(opts).await.unwrap();
         pool.close().await;
 

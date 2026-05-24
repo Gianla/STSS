@@ -30,6 +30,7 @@ sntpc = { version = "0.10.1", features = ["std"] }
 sntpc-net-tokio = "1"
 clap = { version = "4.4", features = ["derive"] }
 anyhow = "1.0.102"
+rand = "0.8.6"
 
 # for testing
 [dev-dependencies]
