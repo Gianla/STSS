@@ -681,6 +681,7 @@ mod tests {
             )
             .await
             .unwrap();
+
         let resp = Response::deserialize(client.next().await.unwrap().unwrap()).unwrap();
         assert!(matches!(resp, Response::Ok));
 
@@ -693,6 +694,7 @@ mod tests {
             )
             .await
             .unwrap();
+
         let resp = Response::deserialize(client.next().await.unwrap().unwrap()).unwrap();
         assert!(matches!(resp, Response::Ok));
 
@@ -701,7 +703,9 @@ mod tests {
             .send(Request::HowManyTokensDoIHave.serialize().unwrap())
             .await
             .unwrap();
+
         let resp = Response::deserialize(client.next().await.unwrap().unwrap()).unwrap();
+
         if let Response::TokenCount(count) = resp {
             assert_eq!(count.to_host(), 0);
         } else {
@@ -713,6 +717,7 @@ mod tests {
             .send(Request::LogOut.serialize().unwrap())
             .await
             .unwrap();
+
         let resp = Response::deserialize(client.next().await.unwrap().unwrap()).unwrap();
         assert!(matches!(resp, Response::Ok));
 
@@ -721,6 +726,7 @@ mod tests {
             .send(Request::HowManyTokensDoIHave.serialize().unwrap())
             .await
             .unwrap();
+
         let resp = Response::deserialize(client.next().await.unwrap().unwrap()).unwrap();
         assert!(matches!(resp, Response::NotLoggedIn));
     }
@@ -735,6 +741,7 @@ mod tests {
             .send(Request::HowManyTokensDoIHave.serialize().unwrap())
             .await
             .unwrap();
+
         let resp = Response::deserialize(client.next().await.unwrap().unwrap()).unwrap();
         assert!(matches!(resp, Response::NotLoggedIn));
 
@@ -743,6 +750,7 @@ mod tests {
             .send(Request::SignHash([0u8; 32]).serialize().unwrap())
             .await
             .unwrap();
+
         let resp = Response::deserialize(client.next().await.unwrap().unwrap()).unwrap();
         assert!(matches!(resp, Response::NotLoggedIn));
 
@@ -756,6 +764,7 @@ mod tests {
             )
             .await
             .unwrap();
+
         let _ = client.next().await.unwrap().unwrap();
         client
             .send(
@@ -765,6 +774,7 @@ mod tests {
             )
             .await
             .unwrap();
+
         let _ = client.next().await.unwrap().unwrap();
 
         // Now that we are logged in, try to Sign Up again with another username
@@ -776,13 +786,14 @@ mod tests {
             )
             .await
             .unwrap();
+
         let resp = Response::deserialize(client.next().await.unwrap().unwrap()).unwrap();
         assert!(matches!(
             resp,
             Response::SignInFailed(SignInError::AlreadyLoggedIn)
         ));
 
-        // Try to Login again while already logged in
+        // Try to log in again while already logged in
         client
             .send(
                 Request::Login("bob".to_string(), "pass123".to_string())
@@ -791,6 +802,7 @@ mod tests {
             )
             .await
             .unwrap();
+
         let resp = Response::deserialize(client.next().await.unwrap().unwrap()).unwrap();
         assert!(matches!(
             resp,
@@ -811,6 +823,7 @@ mod tests {
             )
             .await
             .unwrap();
+
         let _ = client.next().await.unwrap().unwrap();
         client
             .send(
@@ -820,6 +833,7 @@ mod tests {
             )
             .await
             .unwrap();
+
         let _ = client.next().await.unwrap().unwrap();
 
         // 1. Buy 10 tokens
@@ -831,7 +845,9 @@ mod tests {
             )
             .await
             .unwrap();
+
         let resp = Response::deserialize(client.next().await.unwrap().unwrap()).unwrap();
+
         if let Response::TokenCount(count) = resp {
             assert_eq!(count.to_host(), 10);
         } else {
@@ -844,6 +860,7 @@ mod tests {
             .send(Request::SignHash(fake_hash).serialize().unwrap())
             .await
             .unwrap();
+
         let resp = Response::deserialize(client.next().await.unwrap().unwrap()).unwrap();
         assert!(matches!(resp, Response::Token { .. })); // Signature generated successfully
 
@@ -852,6 +869,7 @@ mod tests {
             .send(Request::HowManyTokensDoIHave.serialize().unwrap())
             .await
             .unwrap();
+
         let resp = Response::deserialize(client.next().await.unwrap().unwrap()).unwrap();
         if let Response::TokenCount(count) = resp {
             assert_eq!(count.to_host(), 9);
@@ -892,6 +910,7 @@ mod tests {
             )
             .await
             .unwrap();
+
         let _ = client_framed.next().await;
         client_framed
             .send(
@@ -901,6 +920,7 @@ mod tests {
             )
             .await
             .unwrap();
+
         let _ = client_framed.next().await;
 
         // SIMULATING CTRL+C: The server triggers the global cancellation token
@@ -947,6 +967,7 @@ mod tests {
 
         // Start handler for Client A
         let state_a = state.clone();
+
         tokio::spawn(async move {
             let _ = conn_handler_core(
                 "127.0.0.1:1111".parse().unwrap(),
@@ -958,6 +979,7 @@ mod tests {
 
         // Start handler for Client B (the attacker)
         let state_b = state.clone();
+
         tokio::spawn(async move {
             let _ = conn_handler_core(
                 "127.0.0.1:2222".parse().unwrap(),
@@ -976,6 +998,7 @@ mod tests {
             )
             .await
             .unwrap();
+
         let resp_a = Response::deserialize(client_a_framed.next().await.unwrap().unwrap()).unwrap();
         assert!(matches!(resp_a, Response::Ok));
 
@@ -988,6 +1011,7 @@ mod tests {
             )
             .await
             .unwrap();
+
         let resp_b = Response::deserialize(client_b_framed.next().await.unwrap().unwrap()).unwrap();
 
         // The server must reject Client B since the user is already logged in
@@ -1001,8 +1025,11 @@ mod tests {
             .send(Request::HowManyTokensDoIHave.serialize().unwrap())
             .await
             .unwrap();
-        let resp_a_still_alive =
-            Response::deserialize(client_a_framed.next().await.unwrap().unwrap()).unwrap();
+
+        let response = client_a_framed.next().await.unwrap().unwrap();
+
+        let resp_a_still_alive = Response::deserialize(response).unwrap();
+
         assert!(matches!(resp_a_still_alive, Response::TokenCount(_)));
     }
 
@@ -1031,6 +1058,7 @@ mod tests {
             )
             .await
             .unwrap();
+
         state
             .database
             .add_user_tokens("poor_user", 1)
@@ -1055,6 +1083,7 @@ mod tests {
             )
             .await
             .unwrap();
+
         let _ = client_framed.next().await;
 
         // First signature request (Consumes the only available token)
@@ -1062,6 +1091,7 @@ mod tests {
             .send(Request::SignHash([1u8; 32]).serialize().unwrap())
             .await
             .unwrap();
+
         let resp1 = Response::deserialize(client_framed.next().await.unwrap().unwrap()).unwrap();
         assert!(matches!(resp1, Response::Token { .. })); // Success!
 
@@ -1070,6 +1100,7 @@ mod tests {
             .send(Request::SignHash([1u8; 32]).serialize().unwrap())
             .await
             .unwrap();
+
         let resp2 = Response::deserialize(client_framed.next().await.unwrap().unwrap()).unwrap();
 
         // The server must block the operation
