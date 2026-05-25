@@ -615,8 +615,6 @@ impl Generator {
     ) -> Result<(), TomlGenError> {
         let (is_crypto_hardware_accelerated, n_threads) = heuristic_working_threads(thread_limits);
 
-        println!("I am in {:?}", current_dir());
-
         let get_canonical_path = |file_name: &str| {
             self.env
                 .server_dir
