@@ -1,0 +1,7 @@
+[package]
+name = "certification_authority"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rcgen = { version = "0.14.8", features = ["x509-parser", "pem"] }

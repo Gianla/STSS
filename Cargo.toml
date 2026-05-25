@@ -1,5 +1,5 @@
 [workspace]
-members = ["client_cli", "client_core", "server", "shared_library", "terraform"]
+members = ["certification_authority","client_cli", "client_core", "server", "shared_library", "terraform"]
 resolver = "3"
 
 [workspace.package]

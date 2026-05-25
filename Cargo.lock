@@ -246,6 +246,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "certification_authority"
+version = "0.1.0"
+dependencies = [
+ "rcgen",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

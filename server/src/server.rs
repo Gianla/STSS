@@ -9,7 +9,7 @@ use rsa::sha2::{Digest, Sha256};
 use rsa::{Pkcs1v15Sign, RsaPrivateKey};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::ServerConfig;
-use shared_library::protocol::Timestamp;
+use shared_library::server_protocol::Timestamp;
 use std::future::Future;
 use std::io::ErrorKind;
 use std::net::SocketAddr;

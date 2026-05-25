@@ -4,7 +4,7 @@
 use dashmap::DashSet;
 use futures::{SinkExt, StreamExt};
 use rsa::RsaPrivateKey;
-use shared_library::protocol::{LoginError, Request, Response, SignInError, Timestamp};
+use shared_library::server_protocol::{LoginError, Request, Response, SignInError, Timestamp};
 use std::fmt::{Display, Formatter};
 use std::io::ErrorKind;
 use std::net::SocketAddr;
@@ -660,7 +660,7 @@ mod tests {
     use super::*;
     use futures::{SinkExt, StreamExt};
     use rsa::RsaPrivateKey;
-    use shared_library::protocol::{LoginError, Request, Response, SignInError};
+    use shared_library::server_protocol::{LoginError, Request, Response, SignInError};
     use std::net::SocketAddr;
     use tokio_util::codec::{Framed, LengthDelimitedCodec};
     use tokio_util::sync::CancellationToken;
