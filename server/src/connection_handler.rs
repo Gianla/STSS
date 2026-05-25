@@ -4,7 +4,6 @@
 use dashmap::DashSet;
 use futures::{SinkExt, StreamExt};
 use rsa::RsaPrivateKey;
-use shared_library::network_numbers::NetworkLongLong;
 use shared_library::protocol::{LoginError, Request, Response, SignInError, Timestamp};
 use std::fmt::{Display, Formatter};
 use std::io::ErrorKind;
@@ -583,19 +582,17 @@ where
                 }
             }
 
-            Request::PurchaseTokens(be_tokens) => {
-                let tokens = be_tokens.to_host();
-
+            Request::PurchaseTokens(tokens) => {
                 match database.add_user_tokens(&username, tokens).await {
                     Ok(new_token_count) => {
                         info!("{} updated their tokens: {}.", username, new_token_count);
                         // In this case, we do not send a simple Ok to the client, but we
                         // send a stronger confirmation that its tokens have been updated.
-                        Response::TokenCount(NetworkLongLong::from(new_token_count))
+                        Response::TokenCount(new_token_count)
                     }
 
                     Err(token_add_error) => match token_add_error {
-                        AddTokensError::TokenOverflow => Response::TokenAmountTooHigh(be_tokens),
+                        AddTokensError::TokenOverflow => Response::TokenAmountTooHigh(tokens),
                         AddTokensError::UserDoesNotExist => {
                             return Err(HandlerError::Domain {
                                 username: Some(session.username.clone()),
@@ -615,7 +612,7 @@ where
             Request::HowManyTokensDoIHave => match database.get_user_tokens(&username).await {
                 Ok(n_tokens) => {
                     info!("{} requested their tokens: {}.", username, n_tokens);
-                    Response::TokenCount(NetworkLongLong::from(n_tokens))
+                    Response::TokenCount(n_tokens)
                 }
 
                 Err(GetTokensError::UserDoesNotExist) => {
@@ -663,7 +660,6 @@ mod tests {
     use super::*;
     use futures::{SinkExt, StreamExt};
     use rsa::RsaPrivateKey;
-    use shared_library::network_numbers::NetworkLongLong;
     use shared_library::protocol::{LoginError, Request, Response, SignInError};
     use std::net::SocketAddr;
     use tokio_util::codec::{Framed, LengthDelimitedCodec};
@@ -755,7 +751,7 @@ mod tests {
         let resp = Response::deserialize(client.next().await.unwrap().unwrap()).unwrap();
 
         if let Response::TokenCount(count) = resp {
-            assert_eq!(count.to_host(), 0);
+            assert_eq!(count, 0);
         } else {
             panic!("Expected TokenCount, received: {:?}", resp);
         }
@@ -886,18 +882,14 @@ mod tests {
 
         // 1. Buy 10 tokens
         client
-            .send(
-                Request::PurchaseTokens(NetworkLongLong::from(10))
-                    .serialize()
-                    .unwrap(),
-            )
+            .send(Request::PurchaseTokens(10).serialize().unwrap())
             .await
             .unwrap();
 
         let resp = Response::deserialize(client.next().await.unwrap().unwrap()).unwrap();
 
         if let Response::TokenCount(count) = resp {
-            assert_eq!(count.to_host(), 10);
+            assert_eq!(count, 10);
         } else {
             panic!("Expected TokenCount, received: {:?}", resp);
         }
@@ -920,7 +912,7 @@ mod tests {
 
         let resp = Response::deserialize(client.next().await.unwrap().unwrap()).unwrap();
         if let Response::TokenCount(count) = resp {
-            assert_eq!(count.to_host(), 9);
+            assert_eq!(count, 9);
         } else {
             panic!("Expected TokenCount, received: {:?}", resp);
         }
