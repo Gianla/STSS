@@ -1,10 +1,15 @@
 //! Main user of terraform::lib.rs, as well as a simple wrapper around it.
 
 use clap::Parser;
+use std::io::{self, Write, Error};
 use std::path::PathBuf;
-use std::process;
 
 use terraform::{AnyServerFiles, EnvironmentGeneratorBuilder, Generator};
+
+/// Wrapper to craft error easily.
+fn main_error(msg: impl AsRef<str>) -> io::Result<()> {
+    Err( Error::other(msg.as_ref()) )
+}
 
 /// CLI tool to bootstrap the TSA Project simulation environment
 #[derive(Parser, Debug)]
@@ -34,11 +39,13 @@ struct Cli {
     ca_prefix: String,
 }
 
-fn main() {
+fn main() -> io::Result<()> {
     // Parse command line arguments
     let cli = Cli::parse();
 
-    println!("Initializing the environment in directory: {:?}", cli.root);
+    let mut stdout = io::stdout().lock();
+
+    writeln!(stdout, "Initializing the environment in directory: {:?}", cli.root)?;
 
     // 1. Build the EnvironmentGenerator
     let mut env_builder = EnvironmentGeneratorBuilder::from_simulation_dir(&cli.root);
@@ -49,8 +56,7 @@ fn main() {
                 env_builder.with_client_dir(valid_name);
             }
             Err(e) => {
-                eprintln!("Invalid client directory name provided: {}", e);
-                process::exit(1);
+                return main_error(format!("Invalid client directory name provided: {}", e));
             }
         }
     }
@@ -61,8 +67,7 @@ fn main() {
                 env_builder.with_server_dir(valid_name);
             }
             Err(e) => {
-                eprintln!("Invalid server directory name provided: {}", e);
-                process::exit(1);
+                return main_error(format!("Invalid server directory name provided: {}", e));
             }
         }
     }
@@ -73,8 +78,7 @@ fn main() {
                 env_builder.with_ca_dir(valid_name);
             }
             Err(e) => {
-                eprintln!("Invalid CA directory name provided: {}", e);
-                process::exit(1);
+                return main_error(format!("Invalid CA directory name provided: {}", e));
             }
         }
     }
@@ -82,8 +86,7 @@ fn main() {
     let env = match env_builder.build() {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("Error creating directories: {}", e);
-            process::exit(1);
+            return main_error(format!("Error creating directories: {}", e));
         }
     };
 
@@ -91,16 +94,14 @@ fn main() {
     let server_files = match AnyServerFiles::default(cli.server_prefix.as_str()) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("Invalid server prefix: {}", e);
-            process::exit(1);
+            return main_error(format!("Invalid server prefix: {}", e));
         }
     };
 
     let ca_files = match AnyServerFiles::default(cli.ca_prefix.as_str()) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("Invalid CA prefix: {}", e);
-            process::exit(1);
+            return main_error(format!("Invalid CA prefix: {}", e));
         }
     };
 
@@ -108,20 +109,19 @@ fn main() {
     let generator = match Generator::new_from_files(server_files, ca_files, env) {
         Ok(g) => g,
         Err(e) => {
-            eprintln!("Failed to initialize the generator: {}", e);
-            process::exit(1);
+            return main_error(format!("Failed to initialize the generator: {}", e));
         }
     };
 
-    println!("Generating keys, certificates, and configuration files...");
+    writeln!(stdout, "Generating keys, certificates, and configuration files...")?;
 
     match generator.generate_all() {
         Ok(_) => {
-            println!("Environment generated successfully!");
+            writeln!(stdout, "Environment generated successfully!")?;
+            Ok(())
         }
         Err(e) => {
-            eprintln!("Fatal error during generation: {}", e);
-            process::exit(1);
+            main_error(format!("Fatal error during generation: {}", e))
         }
     }
 }
