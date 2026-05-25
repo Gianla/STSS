@@ -188,6 +188,49 @@ impl TimeOracle {
     }
 }
 
+/// Pure function to compute the offset.
+fn compute_offset(
+    ntp_secs: u64,
+    ntp_nanos: u64,
+    local_now: SystemTime,
+) -> Result<i64, TimeOracleError> {
+    // Take the NTP server's seconds.
+    let total_ntp_nanos = ntp_secs
+        // Multiply it for 10^9 to get it into milliseconds.
+        .checked_mul(1_000_000_000)
+        // Safely add the NTP server's nanoseconds.
+        .and_then(|ns| ns.checked_add(ntp_nanos))
+        // If the sum was not successful (overflow), return an error. Note that this
+        // behavior is so drastic only because this is a really hard case, however,
+        // we might want to handle that differently in the future (e.g. use a
+        // fallback value).
+        .ok_or_else(|| TimeOracleError::GenericNetworkError("NTP timestamp overflow".into()))?;
+
+    // Get the duration since 1 Jan 1970.
+    if let Ok(duration) = local_now.duration_since(UNIX_EPOCH) {
+        // If not negative, get it as nanoseconds.
+        let total_local_nanos: u128 = duration.as_nanos();
+
+        // Converts safely a u64 into a i128.
+        let ntp_128 = i128::from(total_ntp_nanos);
+
+        // Try to downcast a u128 into a i128, otherwise, cap it to its maximum.
+        let local_128 = i128::try_from(total_local_nanos).unwrap_or(i128::MAX);
+
+        // Calculate the offset. Shouldn't panic, but we set the default at 0
+        // anyway.
+        let offset_128 = ntp_128.checked_sub(local_128).unwrap_or(0);
+
+        // We try to extract the offset into a u64, otherwise capping it to its
+        // max/min value depending on the limit.
+        let capped = offset_128.clamp(i64::MIN as i128, i64::MAX as i128);
+
+        Ok(capped as i64)
+    } else {
+        Err(TimeOracleError::TimeWentBackwards)
+    }
+}
+
 /// Background worker responsible for maintaining the NTP synchronization.
 /// This should be spawned in a dedicated Tokio task.
 pub struct TimeSyncWorker {
@@ -235,45 +278,14 @@ impl TimeSyncWorker {
                     // fraction_to_nanoseconds() returns u32, so again, it's safe.
                     let ntp_nanos = sntpc::fraction_to_nanoseconds(ntp_time.sec_fraction()) as u64;
 
-                    // Take the NTP server's seconds.
-                    let total_ntp_nanos = ntp_secs
-                        // Multiply it for 10^9 to get it into milliseconds.
-                        .checked_mul(1_000_000_000)
-                        // Safely add the NTP server's nanoseconds.
-                        .and_then(|ns| ns.checked_add(ntp_nanos))
-                        // If the sum was not successful (overflow), return an error. Note that this
-                        // behavior is so drastic only because this is a really hard case, however,
-                        // we might want to handle that differently in the future (e.g. use a
-                        // fallback value).
-                        .ok_or_else(|| {
-                            TimeOracleError::GenericNetworkError("NTP timestamp overflow".into())
-                        })?;
-
-                    // Get the duration since 1 Jan 1970.
-                    if let Ok(duration) = SystemTime::now().duration_since(UNIX_EPOCH) {
-                        // If not negative, get it as nanoseconds.
-                        let total_local_nanos: u128 = duration.as_nanos();
-
-                        // Converts safely a u64 into a i128.
-                        let ntp_128 = i128::from(total_ntp_nanos);
-
-                        // Try to downcast a u128 into a i128, otherwise, cap it to its maximum.
-                        let local_128 = i128::try_from(total_local_nanos).unwrap_or(i128::MAX);
-
-                        // Calculate the offset. Shouldn't panic, but we set the default at 0
-                        // anyway.
-                        let offset_128 = ntp_128.checked_sub(local_128).unwrap_or(0);
-
-                        // We try to extract the offset into a u64, otherwise capping it to its
-                        // max/min value depending on the limit.
-                        let capped = offset_128.clamp(i64::MIN as i128, i64::MAX as i128);
-                        let offset_i64 = capped as i64;
-
-                        self.offset_nanos.store(offset_i64, Ordering::Relaxed);
-                    } else {
-                        return Err(TimeOracleError::TimeWentBackwards);
+                    match compute_offset(ntp_secs, ntp_nanos, SystemTime::now()) {
+                        Ok(offset_i64) => {
+                            self.offset_nanos.store(offset_i64, Ordering::Relaxed);
+                        }
+                        Err(e) => return Err(e),
                     }
                 }
+
                 Err(error) => match error {
                     sntpc::Error::Network => {
                         info!(
@@ -385,5 +397,83 @@ mod tests {
 
         // Abort the background task to cleanly exit the test.
         worker_handle.abort();
+    }
+
+    /// Test the mathematical overflow during the conversion of NTP seconds to nanoseconds.
+    #[test]
+    fn test_ntp_timestamp_overflow() {
+        // Use the maximum value of u64 to force the failure of checked_mul.
+        let ntp_secs = u64::MAX;
+        let ntp_nanos = 0;
+        let local_now = UNIX_EPOCH;
+
+        let result = compute_offset(ntp_secs, ntp_nanos, local_now);
+
+        assert!(result.is_err());
+        if let Err(TimeOracleError::GenericNetworkError(msg)) = result {
+            assert!(msg.contains("NTP timestamp overflow"));
+        } else {
+            panic!("Expected an NTP timestamp overflow error.");
+        }
+    }
+
+    /// Test the case where the local clock goes backward in time before 1970.
+    #[test]
+    fn test_local_time_went_backwards() {
+        let ntp_secs = 1_000_000;
+        let ntp_nanos = 0;
+        // Simulate a system time prior to UNIX_EPOCH such as a badly reset clock.
+        let local_now = UNIX_EPOCH - Duration::from_secs(60);
+
+        let result = compute_offset(ntp_secs, ntp_nanos, local_now);
+
+        assert!(matches!(result, Err(TimeOracleError::TimeWentBackwards)));
+    }
+
+    /// Test upper clamping when the NTP server is far in the future compared to the local clock.
+    #[test]
+    fn test_offset_clamps_to_max() {
+        // Choose a very large NTP time that does not overflow checked_mul but exceeds i64::MAX when
+        // converted to nanoseconds.
+        let ntp_secs = 10_000_000_000;
+        let ntp_nanos = 0;
+        // The local clock is frozen at the 1970 UNIX_EPOCH.
+        let local_now = UNIX_EPOCH;
+
+        let result = compute_offset(ntp_secs, ntp_nanos, local_now).unwrap();
+
+        // The actual difference would exceed i64::MAX so it must be capped.
+        assert_eq!(result, i64::MAX);
+    }
+
+    /// Test lower clamping when the NTP server is far in the past compared to the local clock.
+    #[test]
+    fn test_offset_clamps_to_min() {
+        // The NTP server responds indicating 0 seconds from UNIX_EPOCH.
+        let ntp_secs = 0;
+        let ntp_nanos = 0;
+
+        // The local computer assumes it is far in the future exceeding the negative i64 limit in
+        // nanoseconds.
+        let far_future_secs = 13_500_000_000;
+        let local_now = UNIX_EPOCH + Duration::from_secs(far_future_secs);
+
+        let result = compute_offset(ntp_secs, ntp_nanos, local_now).unwrap();
+
+        // The difference must stop at i64::MIN without causing a panic.
+        assert_eq!(result, i64::MIN);
+    }
+
+    /// Test the standard path with a normal offset where NTP is ahead by 5 seconds.
+    #[test]
+    fn test_normal_offset_calculation() {
+        let ntp_secs = 105;
+        let ntp_nanos = 0;
+        let local_now = UNIX_EPOCH + Duration::from_secs(100);
+
+        let result = compute_offset(ntp_secs, ntp_nanos, local_now).unwrap();
+
+        // Subtracting local time from NTP time results in a positive 5-second offset.
+        assert_eq!(result, 5_000_000_000);
     }
 }
