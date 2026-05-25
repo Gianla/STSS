@@ -62,6 +62,7 @@ pub enum Response {
     NotEnoughTokens,
     Token { sign: Vec<u8>, timestamp: Timestamp },
     OperationError(String),
+    ServerIsShuttingDown,
 }
 
 macro_rules! impl_network_message {

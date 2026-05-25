@@ -24,6 +24,7 @@ use tokio::task::JoinError;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info, warn};
 use tracing_appender::non_blocking::WorkerGuard;
 
@@ -401,7 +402,26 @@ impl STSServer {
         })
     }
 
-    pub fn run(mut self) -> Result<(), STSServerRunError> {
+    /// Wrapper around the more complex run_with_signal(). run_with_signal() is needed in order to
+    /// test the server with different stopping signals than ctrl+c. This function calls it with
+    /// only the only shutdown option ctrl+c, furthermore, it can be used in the future to update
+    /// the shutdown methods.
+    pub fn run(self) -> Result<(), STSServerRunError> {
+        self.run_with_signal(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+    }
+
+    /// Mainly, it does three things:
+    /// 1. spawns the asynchronous time oracle worker, used to sync the clock;
+    /// 2. spawns the asynchronous shutdown signal listener, whatever that signal can be (default:
+    ///    ctrl+c), used to shut down the connected clients and the server gracefully;
+    /// 3. calls the asynchronous client acceptor loop.
+    #[inline(always)]
+    fn run_with_signal<F>(mut self, shutdown_signal: F) -> Result<(), STSServerRunError>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
         let token_for_signal = self.state.clone_cancel_token();
         let token_for_run = self.state.clone_cancel_token();
         let token_for_sync = self.state.clone_cancel_token();
@@ -413,7 +433,7 @@ impl STSServer {
                 tokio::spawn(async move {
                     if let Err(e) = worker.start_syncing().await {
                         error!(
-                            "Fatal syncing error: {}. Interrupting the server.",
+                            "[Critical] Fatal syncing error: {}. Interrupting the server.",
                             e.to_string()
                         );
                         token_for_sync.cancel();
@@ -421,28 +441,25 @@ impl STSServer {
                 });
             } else {
                 error!(
-                    "Assertion: worker was already taken, but this should be impossible. \
+                    "[Critical] Worker was already taken, but this should be impossible. \
                      Interrupting the server."
                 );
                 token_for_sync.cancel();
             }
 
             tokio::spawn(async move {
-                if let Ok(()) = tokio::signal::ctrl_c().await {
-                    info!("Detected interruption, sending cancel command to the tasks.");
-                    token_for_signal.cancel();
-                }
+                shutdown_signal.await;
+                info!("Detected interruption, sending cancel command to the tasks.");
+                token_for_signal.cancel();
             });
 
-            self.internal_run(token_for_run).await?;
-
-            info!("Clients disconnected, server closing.");
+            self.accept_loop(token_for_run).await?;
 
             Ok(())
         })
     }
 
-    async fn internal_run(&self, cancel_token: CancellationToken) -> Result<(), STSServerRunError> {
+    async fn accept_loop(&self, cancel_token: CancellationToken) -> Result<(), STSServerRunError> {
         let listener = TcpListener::bind(self.address)
             .await
             .map_err(|e| match e.kind() {
@@ -458,6 +475,12 @@ impl STSServer {
             "Address {} bounded, listening for incoming connections.",
             self.address
         );
+
+        // Instead of spawning coroutines randomly, we use a tracker. A tracker is also useful to
+        // spawn coroutines, except it can wait for them to end properly. The challenge becomes to
+        // make them end in some way. We believe that this has been addressed properly inside
+        // connection_handler(), therefore, a tracker can only make our server more resilient.
+        let tracker = TaskTracker::new();
 
         let mut _unanswered_syn_count: u64 = 0;
 
@@ -495,7 +518,7 @@ impl STSServer {
             let state_clone = self.state.clone();
             let tls_acceptor_clone = self.tls_acceptor.clone();
 
-            tokio::spawn(async move {
+            tracker.spawn(async move {
                 // Wrapping the newbie stream into a tls_stream will perform the TLS handshake.
                 // The TLS acceptor is interpreted as the server-side of the handshake, where we
                 // loaded certificates and configurations before.
@@ -601,8 +624,17 @@ impl STSServer {
                 Ok::<(), std::io::Error>(())
             });
         }
-        debug!("Outside of server's loop, stopping the internal run.");
+
+        tracker.close();
+
+        info!("Interrupt requested. Waiting for clients to disconnect...");
+
+        tracker.wait().await;
+
+        info!("Done. Exiting gracefully.");
 
         Ok(())
     }
 }
+
+

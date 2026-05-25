@@ -123,10 +123,15 @@ impl TimeOracle {
         let local_now = SystemTime::now();
         let offset = self.offset_nanos.load(Ordering::Relaxed);
 
-        if offset > 0 {
-            local_now + Duration::from_nanos(offset as u64)
+        if offset >= 0 {
+            local_now
+                .checked_add(Duration::from_nanos(offset as u64))
+                .unwrap_or(local_now)
         } else {
-            local_now - Duration::from_nanos((-offset) as u64)
+            // unsigned_abs() handles i64::MIN in a secure way. That's really paranoid, but heh...
+            local_now
+                .checked_sub(Duration::from_nanos(offset.unsigned_abs()))
+                .unwrap_or(local_now)
         }
     }
 }
@@ -184,17 +189,57 @@ impl TimeSyncWorker {
                 Err(e) => return Err(TimeOracleError::GenericNetworkError(e.to_string())),
             };
 
+            // No unchecked (aka without over/underflow protection) math is allowed in this project.
+            // Therefore, what follows is the complex way to say "get the offset from the NTP server
+            // to your local clock".
             match get_time(addr, &sntpc_wrapper, self.sntpc_context).await {
                 Ok(ntp_time) => {
+                    // Get the seconds in u32, so convert it to u64 is safe.
                     let ntp_secs = ntp_time.sec() as u64;
-                    let ntp_nanos = sntpc::fraction_to_nanoseconds(ntp_time.sec_fraction());
-                    let total_ntp_nanos = (ntp_secs * 1_000_000_000) + ntp_nanos as u64;
+                    // fraction_to_nanoseconds() returns u32, so again, it's safe.
+                    let ntp_nanos = sntpc::fraction_to_nanoseconds(ntp_time.sec_fraction()) as u64;
 
+                    // Take the NTP server's seconds.
+                    let total_ntp_nanos = ntp_secs
+                        // Multiply it for 10^9 to get it into milliseconds.
+                        .checked_mul(1_000_000_000)
+                        // Safely add the NTP server's nanoseconds.
+                        .and_then(|ns| ns.checked_add(ntp_nanos))
+                        // If the sum was not successful (overflow), return an error. Note that this
+                        // behavior is so drastic only because this is a really hard case, however,
+                        // we might want to handle that differently in the future (e.g. use a
+                        // fallback value).
+                        .ok_or_else(|| {
+                            TimeOracleError::GenericNetworkError("NTP timestamp overflow".into())
+                        })?;
+
+                    // Get the duration since 1 Jan 1970.
                     if let Ok(duration) = SystemTime::now().duration_since(UNIX_EPOCH) {
-                        let total_local_nanos = duration.as_nanos() as u64;
-                        let offset = total_ntp_nanos as i64 - total_local_nanos as i64;
+                        // If not negative, get it as nanoseconds.
+                        let total_local_nanos: u128 = duration.as_nanos();
 
-                        self.offset_nanos.store(offset, Ordering::Relaxed);
+                        // Converts safely a u64 into a i128.
+                        let ntp_128 = i128::from(total_ntp_nanos);
+
+                        // Try to downcast a u128 into a i128, otherwise, cap it to its maximum.
+                        let local_128 = i128::try_from(total_local_nanos).unwrap_or(i128::MAX);
+
+                        // Calculate the offset. Shouldn't panic, but we set the default at 0
+                        // anyway.
+                        let offset_128 = ntp_128.checked_sub(local_128).unwrap_or(0);
+
+                        // We try to extract the offset into a u64, otherwise capping it to its
+                        // max/min value depending on the limit.
+                        let offset_i64 = i64::try_from(offset_128)
+                            .unwrap_or(
+                                if offset_128 > 0 {
+                                    i64::MAX
+                                } else {
+                                    i64::MIN
+                                }
+                            );
+
+                        self.offset_nanos.store(offset_i64, Ordering::Relaxed);
                     } else {
                         return Err(TimeOracleError::TimeWentBackwards);
                     }

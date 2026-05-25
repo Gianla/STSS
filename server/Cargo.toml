@@ -12,7 +12,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "1.1.2"
 thiserror = "2.0.18"
 rsa = { version = "0.9.10", features = ["pem", "sha2"] }
-tokio-util = { version = "0.7.18", features = ["codec"] }
+tokio-util = { version = "0.7.18", features = ["codec", "rt"] }
 futures = "0.3.32"
 shared_library = { path = "../shared_library" }
 rustls-pki-types = "1.14.1"
@@ -36,3 +36,5 @@ rand = "0.8.6"
 [dev-dependencies]
 tempfile = "3.8"
 
+[lints.clippy]
+arithmetic_side_effects = "deny"

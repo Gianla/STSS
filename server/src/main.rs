@@ -1,4 +1,3 @@
-#![deny(clippy::arithmetic_side_effects)]
 #![forbid(unsafe_code)]
 
 use anyhow::{Context, Result};
