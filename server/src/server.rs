@@ -28,8 +28,9 @@ use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info, warn};
 use tracing_appender::non_blocking::WorkerGuard;
 
-/// Where to write logs. For the moment, we support stdout and a filepath.
+/// Where to write logs. For the moment, we support stdout and a filepath (or no logs).
 pub enum LogDestination {
+    None,
     Stdout,
     File { dir: PathBuf, filename: PathBuf },
 }
@@ -291,7 +292,7 @@ pub struct STSServer {
     tls_acceptor: TlsAcceptor,
     state: STSServerState,
     time_oracle_worker: Option<TimeSyncWorker>,
-    _log_guard: WorkerGuard,
+    _log_guard: Option<WorkerGuard>,
 }
 
 impl STSServer {
@@ -314,34 +315,38 @@ impl STSServer {
             database_location,
         }: ServerContext,
     ) -> Result<Self, STSServerBuildError> {
-        let (non_blocking_writer, _log_guard, startup_msg) = match log_output {
+        let log_setup = match log_output {
+            LogDestination::None => None,
             LogDestination::Stdout => {
                 let (writer, guard) = tracing_appender::non_blocking(std::io::stdout());
-                (writer, guard, "Logger initialized on stdout".to_string())
+                Some((writer, guard, "Logger initialized on stdout".to_string()))
             }
             LogDestination::File { dir, filename } => {
                 let file_appender = tracing_appender::rolling::never(&dir, &filename);
                 let (writer, guard) = tracing_appender::non_blocking(file_appender);
 
-                let full_path = Path::new(&dir).join(&filename);
-
-                let msg = match full_path.to_str() {
-                    Some(utf8_path) => format!("Logger initialized to file: {}", utf8_path),
-                    None => {
-                        "Logger initialized to the specified file (non-UTF-8 path).".to_string()
-                    }
+                let msg = if let Some(utf8_path) = Path::new(&dir).join(&filename).to_str() {
+                    format!("Logger initialized to file: {}", utf8_path)
+                } else {
+                    "Logger initialized to the specified file (non-UTF-8 path).".to_string()
                 };
 
-                (writer, guard, msg)
+                Some((writer, guard, msg))
             }
         };
 
-        tracing_subscriber::fmt()
-            .with_writer(non_blocking_writer)
-            .try_init()
-            .map_err(|e| STSServerBuildError::Logger(e.to_string()))?;
+        let mut _log_guard = None;
 
-        info!(startup_msg);
+        if let Some((writer, guard, startup_msg)) = log_setup {
+            tracing_subscriber::fmt()
+                .with_writer(writer)
+                .try_init()
+                .map_err(|e| STSServerBuildError::Logger(e.to_string()))?;
+
+            _log_guard = Some(guard);
+
+            info!(startup_msg);
+        }
 
         let mut rt = match working_threads {
             0 => return Err(STSServerBuildError::ZeroWorkingThreads),
@@ -637,4 +642,281 @@ impl STSServer {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+    use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+    use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+    use tokio::sync::oneshot;
+    use tokio_rustls::TlsConnector;
 
+    impl ServerContext {
+        /// Generates a valid, in-memory ServerContext strictly for testing purposes.
+        /// This bypasses the filesystem completely, generating self-signed certificates
+        /// and RSA keys on the fly using the exact same logic of the environment generator.
+        pub fn dummy(port: u16) -> Self {
+            use rcgen::{CertificateParams, DnType, KeyPair, PKCS_ED25519};
+            use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+            use std::net::{IpAddr, Ipv4Addr};
+
+            let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port);
+
+            // 1 working thread, 0 cryptography threads (so it uses the AcceleratedSigner)
+            let runtime_context = RuntimeContext::new(1, 0);
+
+            let server_tls_keypair = KeyPair::generate_for(&PKCS_ED25519)
+                .expect("Failed to generate TLS keypair in tests");
+
+            let mut server_tls_params = CertificateParams::new(vec!["127.0.0.1".to_string()])
+                .expect("Failed to create certificate params");
+
+            server_tls_params
+                .distinguished_name
+                .push(DnType::OrganizationName, "University of Pisa");
+            server_tls_params
+                .distinguished_name
+                .push(DnType::CommonName, "TSA Server Mock");
+
+            let server_tls_cert = server_tls_params
+                .self_signed(&server_tls_keypair)
+                .expect("Failed to self-sign certificate in tests");
+
+            let tls_cert = vec![CertificateDer::from(server_tls_cert.der().to_vec())];
+
+            let tls_priv = PrivateKeyDer::try_from(server_tls_keypair.serialize_der())
+                .expect("Failed to parse the private key DER into rustls PrivateKeyDer");
+
+            let mut rng = rand::thread_rng();
+            let tss_priv = rsa::RsaPrivateKey::new(&mut rng, 2048)
+                .expect("Failed to generate RSA private key in tests");
+
+            let key_context = KeyContext::new(tls_cert, tls_priv, tss_priv);
+
+            Self {
+                address,
+                runtime_context,
+                key_context,
+                time_oracle_bundle: TimeOracleBundle::dummy(),
+                log_output: LogDestination::None,
+                database_location: DataBaseLocation::Memory,
+            }
+        }
+    }
+
+    /// A custom verifier that blindly accepts any server certificate.
+    /// This is strictly required for testing because our mock server generates
+    /// a new self-signed certificate on the fly, which the client wouldn't trust.
+    #[derive(Debug)]
+    struct AcceptAllVerifier;
+
+    impl ServerCertVerifier for AcceptAllVerifier {
+        fn verify_server_cert(
+            &self,
+            _end_entity: &CertificateDer<'_>,
+            _intermediates: &[CertificateDer<'_>],
+            _server_name: &ServerName<'_>,
+            _ocsp_response: &[u8],
+            _now: UnixTime,
+        ) -> Result<ServerCertVerified, rustls::Error> {
+            Ok(ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            vec![
+                SignatureScheme::RSA_PKCS1_SHA256,
+                SignatureScheme::ECDSA_NISTP256_SHA256,
+                SignatureScheme::ED25519,
+            ]
+        }
+    }
+
+    async fn connect_with_retry(addr: &str) -> TcpStream {
+        let attempts: u32 = 0;
+        loop {
+            match TcpStream::connect(addr).await {
+                Ok(stream) => return stream,
+                Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+                    let _ = attempts.wrapping_add(1);
+                    if attempts > 100 {
+                        panic!("Server didn't open the port in time: {}", e);
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(e) => panic!("Unexpected error during TCP connection: {}", e),
+            }
+        }
+    }
+
+    /// Creates a tokio-rustls TlsConnector that accepts any certificate.
+    fn create_test_tls_connector() -> TlsConnector {
+        let config = ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AcceptAllVerifier))
+            .with_no_client_auth();
+
+        TlsConnector::from(Arc::new(config))
+    }
+
+    // =========================================================================
+    // TESTS
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_graceful_shutdown() {
+        let test_port = 8081;
+        let (tx, rx) = oneshot::channel();
+
+        // Spawn the server in a blocking thread to avoid the "runtime within a runtime" panic.
+        let context = ServerContext::dummy(test_port);
+
+        let server_handle = tokio::task::spawn_blocking(move || {
+            let server = STSServer::build_from_context(context).expect("Server failed to build");
+
+            server
+                .run_with_signal(async {
+                    let _ = rx.await;
+                })
+                .expect("Server encountered a run error");
+        });
+
+        // Give the server enough time to bind the TCP listener
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Trigger the shutdown signal
+        tx.send(()).expect("Failed to send shutdown signal");
+
+        // Await the blocking task with a timeout to ensure it doesn't hang forever
+        let result = tokio::time::timeout(Duration::from_secs(3), server_handle).await;
+
+        assert!(
+            result.is_ok(),
+            "The server did not shut down gracefully within the timeout period"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_non_tls_garbage_connection() {
+        let test_port = 8082;
+        let (tx, rx) = oneshot::channel();
+
+        let context = ServerContext::dummy(test_port);
+
+        let server_handle = tokio::task::spawn_blocking(move || {
+            let server = STSServer::build_from_context(context).unwrap();
+            server
+                .run_with_signal(async {
+                    let _ = rx.await;
+                })
+                .unwrap();
+        });
+
+        // Connect using RAW TCP (bypassing TLS entirely)
+        let addr = format!("127.0.0.1:{}", test_port);
+        let mut stream = connect_with_retry(&addr).await;
+
+        // Send raw garbage bytes instead of a valid TLS Client Hello
+        stream
+            .write_all(b"HELLO SERVER THIS IS NOT TLS")
+            .await
+            .expect("Failed to write garbage data");
+        let mut buffer = [0; 1024];
+        let bytes_read = stream.read(&mut buffer).await.unwrap_or(0);
+
+        assert!(
+            bytes_read == 0 || bytes_read == 7,
+            "Server should have dropped the connection or sent a 7-byte TLS Alert, but sent {} \
+             bytes",
+            bytes_read
+        );
+
+        if bytes_read == 7 {
+            assert_eq!(
+                buffer[0],
+                0x15, // 0x15 = 21 (TLS Alert Content Type)
+                "The 7 bytes received should be a TLS Alert packet starting with 0x15"
+            );
+        }
+
+        // Let's see if the stream is really closed.
+        let eof_read = stream.read(&mut buffer).await.unwrap_or(0);
+        assert_eq!(
+            eof_read, 0,
+            "Connection should be completely closed after the alert"
+        );
+
+        // Clean up
+        tx.send(()).unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(3), server_handle).await;
+    }
+
+    #[tokio::test]
+    async fn test_tls_sudden_disconnection() {
+        let test_port = 8083;
+        let (tx, rx) = oneshot::channel();
+        let context = ServerContext::dummy(test_port);
+
+        let server_handle = tokio::task::spawn_blocking(move || {
+            let server = STSServer::build_from_context(context).unwrap();
+            server
+                .run_with_signal(async {
+                    let _ = rx.await;
+                })
+                .unwrap();
+        });
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // 1. Establish a RAW TCP connection
+        let addr = format!("127.0.0.1:{}", test_port);
+        let stream = connect_with_retry(&addr).await;
+
+        // 2. Perform the TLS Handshake using our test connector
+        let connector = create_test_tls_connector();
+        let domain = ServerName::try_from("127.0.0.1").unwrap();
+
+        let _tls_stream = connector
+            .connect(domain, stream)
+            .await
+            .expect("TLS Handshake failed");
+
+        // We are now fully connected via TLS. The server is waiting for framed data.
+
+        // 3. Brutally drop the connection without sending a CloseNotify
+        drop(_tls_stream);
+
+        // Give the server time to process the sudden drop and clear the TaskTracker
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // 4. Ensure the server hasn't panicked and can shut down cleanly
+        tx.send(()).unwrap();
+        let shutdown_result = tokio::time::timeout(Duration::from_secs(3), server_handle).await;
+
+        assert!(
+            shutdown_result.is_ok(),
+            "Server crashed or hung up after a client suddenly disconnected"
+        );
+    }
+}

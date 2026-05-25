@@ -29,6 +29,42 @@ impl TimeOracleBundle {
     }
 }
 
+/// A dummy implementation for tests only.
+#[cfg(test)]
+impl TimeOracleBundle {
+    /// Creates a dummy TimeOracleBundle strictly for testing purposes.
+    /// It binds a UDP socket to a random local port to satisfy the worker's structural
+    /// requirements without performing actual network requests.
+    pub(crate) fn dummy() -> Self {
+        use sntpc::{NtpContext, StdTimestampGen};
+        use std::net::UdpSocket;
+        use std::sync::atomic::AtomicI64;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let listener = UdpSocket::bind("127.0.0.1:0")
+            .expect("Failed to bind a dummy UDP socket for the testing time oracle");
+
+        listener.set_nonblocking(true).unwrap();
+
+        let offset_nanos = Arc::new(AtomicI64::new(0));
+
+        let oracle = TimeOracle {
+            offset_nanos: offset_nanos.clone(),
+        };
+
+        let worker = TimeSyncWorker {
+            ntp_server_addr: "127.0.0.1:123".parse().unwrap(),
+            listener,
+            sntpc_context: NtpContext::new(StdTimestampGen::default()),
+            sync_interval: Duration::from_secs(3600), // Very long interval, won't trigger in tests
+            offset_nanos,
+        };
+
+        Self::internal_new(oracle, worker)
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum TimeOracleError {
     #[error("cannot set nonblocking mode for the udp socket: {0}")]
@@ -230,14 +266,8 @@ impl TimeSyncWorker {
 
                         // We try to extract the offset into a u64, otherwise capping it to its
                         // max/min value depending on the limit.
-                        let offset_i64 = i64::try_from(offset_128)
-                            .unwrap_or(
-                                if offset_128 > 0 {
-                                    i64::MAX
-                                } else {
-                                    i64::MIN
-                                }
-                            );
+                        let capped = offset_128.clamp(i64::MIN as i128, i64::MAX as i128);
+                        let offset_i64 = capped as i64;
 
                         self.offset_nanos.store(offset_i64, Ordering::Relaxed);
                     } else {
