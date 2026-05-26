@@ -11,43 +11,43 @@ fn main_error(msg: impl AsRef<str>) -> io::Result<()> {
     Err( Error::other(msg.as_ref()) )
 }
 
-/// CLI tool to bootstrap the TSA Project simulation environment
+/// CLI tool to bootstrap the TSA Project simulation environment.
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
-    /// The mandatory root directory where the environment will be generated
+    /// The mandatory root directory where the environment will be generated.
     root: PathBuf,
 
-    /// Optional specific name for the client directory
+    /// Optional specific name for the client directory.
     #[arg(long)]
     client_dir: Option<String>,
 
-    /// Optional specific name for the server directory
+    /// Optional specific name for the server directory.
     #[arg(long)]
     server_dir: Option<String>,
 
-    /// Optional specific name for the CA directory
+    /// Optional specific name for the CA directory.
     #[arg(long)]
     ca_dir: Option<String>,
 
-    /// Prefix for the server generated files
+    /// Prefix for the server generated files.
     #[arg(long, default_value = "server_")]
     server_prefix: String,
 
-    /// Prefix for the CA generated files
+    /// Prefix for the CA generated files.
     #[arg(long, default_value = "ca_")]
     ca_prefix: String,
 }
 
 fn main() -> io::Result<()> {
-    // Parse command line arguments
+    // Parse command line arguments.
     let cli = Cli::parse();
 
     let mut stdout = io::stdout().lock();
 
     writeln!(stdout, "Initializing the environment in directory: {:?}", cli.root)?;
 
-    // 1. Build the EnvironmentGenerator
+    // Build the EnvironmentGenerator.
     let mut env_builder = EnvironmentGeneratorBuilder::from_simulation_dir(&cli.root);
 
     if let Some(c) = cli.client_dir {
@@ -90,7 +90,7 @@ fn main() -> io::Result<()> {
         }
     };
 
-    // 2. Build the prefixes for the files
+    // Build the prefixes for the files.
     let server_files = match AnyServerFiles::default(cli.server_prefix.as_str()) {
         Ok(f) => f,
         Err(e) => {
@@ -105,7 +105,7 @@ fn main() -> io::Result<()> {
         }
     };
 
-    // 3. Instantiate the generator and start the process
+    // Instantiate the generator and start the process.
     let generator = match Generator::new_from_files(server_files, ca_files, env) {
         Ok(g) => g,
         Err(e) => {
