@@ -1,12 +1,12 @@
 use client_core::client::ClientContext;
+use rsa::RsaPublicKey;
+use rsa::pkcs8::DecodePublicKey;
 use serde::{Deserialize, Serialize};
 use shared_library::safe_read::{SafeReadError, safe_read};
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZero;
 use std::path::PathBuf;
 use std::sync::Arc;
-use rsa::pkcs8::DecodePublicKey;
-use rsa::RsaPublicKey;
 use thiserror::Error;
 
 const TOML_EXT: Option<&str> = Some(".toml");
@@ -45,7 +45,7 @@ pub enum ContextConversionError {
 
     #[error("cannot parse the specified public key: it is not in UTF-8")]
     PublicKeyNotInUtf8,
-    
+
     #[error("cannot parse the specified public key: {0:?}")]
     PublicKeyParse(String),
 }
@@ -77,7 +77,7 @@ impl Config {
         server_certificate_name: impl Into<String>,
         trust_roots_certificates: bool,
         ca_cert_path: impl Into<PathBuf>,
-        server_rsa_public_key_path: impl Into<PathBuf>
+        server_rsa_public_key_path: impl Into<PathBuf>,
     ) -> Self {
         Self {
             timestamp: TimestampConfig {
@@ -88,10 +88,11 @@ impl Config {
             },
             keys: KeyConfig {
                 ca_cert_path: ca_cert_path.into(),
-                server_rsa_public_key_path: server_rsa_public_key_path.into() },
+                server_rsa_public_key_path: server_rsa_public_key_path.into(),
+            },
         }
     }
-    
+
     pub fn from_file(path: impl Into<PathBuf>) -> Result<Self, ConfigError> {
         let raw_toml = String::from_utf8(safe_read(path, TOML_EXT)?)
             .map_err(|e| ConfigError::TomlNotInUtf8(e.to_string()))?;

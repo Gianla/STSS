@@ -4,7 +4,10 @@ use clap::Parser;
 use std::io::{self, Error, Write};
 use std::path::PathBuf;
 
-use terraform::{AnyServerFiles, ClientFiles, EnvironmentGeneratorBuilder, FileSystemName, FileSystemNameError, Generator};
+use terraform::{
+    AnyServerFiles, ClientFiles, EnvironmentGeneratorBuilder, FileSystemName, FileSystemNameError,
+    Generator,
+};
 
 /// Wrapper to craft error easily.
 fn main_error(msg: impl AsRef<str>) -> io::Result<()> {
@@ -108,9 +111,9 @@ fn main() -> io::Result<()> {
             return main_error(format!("Invalid CA prefix: {}", e));
         }
     };
-    
-    let static_client_toml_name = FileSystemName::try_from("config.toml")
-        .expect("this should never fail");
+
+    let static_client_toml_name =
+        FileSystemName::try_from("config.toml").expect("this should never fail");
 
     let client_files = ClientFiles::new(static_client_toml_name);
 

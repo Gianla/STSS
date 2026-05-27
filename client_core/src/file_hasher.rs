@@ -1,11 +1,11 @@
+use crate::client::STSSClient;
+use rsa::{Pkcs1v15Sign, RsaPublicKey};
+use sha2::{Digest, Sha256};
+use shared_library::safe_read::{SafeFileReader, SafeReadError};
+use shared_library::server_protocol::Timestamp;
 use std::path::PathBuf;
 use std::sync::Arc;
 use thiserror::Error;
-use shared_library::safe_read::{SafeFileReader, SafeReadError};
-use sha2::{Sha256, Digest};
-use rsa::{Pkcs1v15Sign, RsaPublicKey};
-use shared_library::server_protocol::Timestamp;
-use crate::client::STSSClient;
 
 #[derive(Debug, Error)]
 pub enum HashError {
@@ -46,7 +46,7 @@ impl STSSClient {
         signature: &[u8],
     ) -> Result<(), VerifyError> {
         let mut hasher = Sha256::new();
-        
+
         hasher.update(hash_to_verify);
         hasher.update(timestamp.get().to_be_bytes());
 

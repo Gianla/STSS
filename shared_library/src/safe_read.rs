@@ -3,8 +3,8 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
-use std::io::{ErrorKind, Take};
 use std::io::Read;
+use std::io::{ErrorKind, Take};
 use std::path::PathBuf;
 use thiserror::Error;
 
@@ -66,7 +66,10 @@ impl<const CHUNK_SIZE: usize> GenericSafeFileReader<CHUNK_SIZE> {
         // 1. Validate file extension if provided.
         if let Some(e_extension) = expected_extension {
             let e_extension_ref = e_extension.as_ref();
-            if filepath.extension().is_none_or(|ext| ext != e_extension_ref) {
+            if filepath
+                .extension()
+                .is_none_or(|ext| ext != e_extension_ref)
+            {
                 return Err(SafeReadError::WrongExtension(
                     filepath,
                     e_extension_ref.into(),
@@ -108,7 +111,7 @@ impl<const CHUNK_SIZE: usize> GenericSafeFileReader<CHUNK_SIZE> {
             Err(e) => {
                 let err_string = e.to_string();
                 Some(Err(SafeReadError::Read(self.filepath.clone(), err_string)))
-            },
+            }
         }
     }
 

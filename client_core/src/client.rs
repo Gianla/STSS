@@ -1,12 +1,12 @@
 use bytes::Bytes;
 use futures::StreamExt;
 use futures::sink::SinkExt;
+use rsa::{RsaPrivateKey, RsaPublicKey};
 use rustls::pki_types::CertificateDer;
 use shared_library::server_protocol::{LoginError, Request, Response, SignInError, Timestamp};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
-use rsa::{RsaPrivateKey, RsaPublicKey};
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
@@ -51,7 +51,7 @@ impl ClientContext {
             },
         }
     }
-    
+
     pub(crate) fn server_rsa_public_key(&self) -> &RsaPublicKey {
         &self.keys.server_rsa_public_key
     }
@@ -140,7 +140,7 @@ impl STSSClient {
             server_rsa_public_key: keys.server_rsa_public_key,
         })
     }
-    
+
     #[inline(always)]
     pub fn server_rsa_public_key(&self) -> &RsaPublicKey {
         &self.server_rsa_public_key

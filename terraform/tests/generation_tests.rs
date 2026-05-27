@@ -60,7 +60,7 @@ fn test_fails_if_root_directory_already_exists() {
     let env = EnvironmentGeneratorBuilder::build_default(&root_path);
     let server_files = AnyServerFiles::default("server_").unwrap();
     let ca_files = AnyServerFiles::default("ca_").unwrap();
-    let client_files =  ClientFiles::default("im_non_existent.tetext").unwrap();
+    let client_files = ClientFiles::default("im_non_existent.tetext").unwrap();
 
     let generator = Generator::new_from_files(server_files, ca_files, client_files, env).unwrap();
     let result = generator.generate_all();
@@ -119,7 +119,6 @@ fn test_successful_generation_from_scratch() {
     let ca_dir = root_path.join(DEFAULT_CA_ENV_SUBDIR);
     assert!(ca_dir.join("ca_tls_certificate.pem").exists());
     assert!(ca_dir.join("ca_tls_private_key.pem").exists());
-
 }
 
 #[test]
@@ -130,7 +129,7 @@ fn test_generator_fails_with_equal_prefixes() {
     let same_prefix = "same_prefix_";
     let server_files = AnyServerFiles::default(same_prefix).unwrap();
     let ca_files = AnyServerFiles::default(same_prefix).unwrap();
-    let client_files =  ClientFiles::default("config.toml").unwrap();
+    let client_files = ClientFiles::default("config.toml").unwrap();
 
     let result = Generator::new_from_files(server_files, ca_files, client_files, env);
 

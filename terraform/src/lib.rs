@@ -1,19 +1,21 @@
 //! Useful to set up a simulated environment where client, server and CA can communicate between
 //! each other.
 
+use client_cli::config::Config as ClientConfig;
 use const_format::concatcp;
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, PKCS_ED25519};
 use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
 use rsa::{RsaPrivateKey, RsaPublicKey};
+use server::config::{
+    Config as ServerConfig, KeysConfig, NetworkConfig, RuntimeConfig, TimeOracleConfig,
+};
 use std::collections::HashSet;
 use std::convert::Into;
 use std::fmt::Formatter;
+use std::num::NonZero;
 use std::path::{Component, Path, PathBuf};
 use std::{fmt, fs, io};
-use std::num::NonZero;
 use thiserror::Error;
-use server::config::{Config as ServerConfig, KeysConfig, NetworkConfig, RuntimeConfig, TimeOracleConfig};
-use client_cli::config::{Config as ClientConfig};
 
 /// Abstracts a String into a filesystem name, which can be a file or the name of a single
 /// directory. This is useful when working with directories and files,
@@ -318,7 +320,9 @@ pub struct ClientFiles {
 
 impl ClientFiles {
     pub fn new(toml_file: impl Into<FileSystemName>) -> Self {
-        Self { toml_file: toml_file.into() }
+        Self {
+            toml_file: toml_file.into(),
+        }
     }
 
     pub fn default<T>(toml_file: T) -> Result<Self, T::Error>
@@ -326,7 +330,7 @@ impl ClientFiles {
         T: TryInto<FileSystemName>,
     {
         let file = toml_file.try_into()?;
-        Ok( Self {toml_file: file } )
+        Ok(Self { toml_file: file })
     }
 }
 
@@ -531,8 +535,7 @@ impl Generator {
         // 2. Server TLS generation.
 
         // Generate Server TLS KeyPair.
-        let server_tls_keypair = KeyPair::generate_for(&PKCS_ED25519)
-            .map_err(KeyGenError::Tls)?;
+        let server_tls_keypair = KeyPair::generate_for(&PKCS_ED25519).map_err(KeyGenError::Tls)?;
 
         let server_tls_key_pem = server_tls_keypair.serialize_pem();
 
@@ -637,8 +640,7 @@ impl Generator {
     }
 
     fn get_canonical_path(&self, dir: &Path, file_name: &str) -> Result<PathBuf, TomlGenError> {
-        dir
-            .join(file_name)
+        dir.join(file_name)
             .canonicalize()
             .map_err(|e| TomlGenError::Canonicalize(file_name.to_string(), e))
     }
@@ -654,10 +656,20 @@ impl Generator {
     ) -> Result<(), TomlGenError> {
         let (is_crypto_hardware_accelerated, n_threads) = heuristic_working_threads(thread_limits);
 
-        let tls_cert_path = self.get_canonical_path(self.env.server_dir(), self.server_files.tls_cert_name.as_str())?;
-        let tls_priv_path = self.get_canonical_path(self.env.server_dir(), self.server_files.tls_key_name.as_str())?;
-        let tss_priv_path = self.get_canonical_path(self.env.server_dir(), self.server_files.sign_priv_key_name.as_str())?;
-        let ca_cert_path = self.get_canonical_path(self.env.server_dir(), self.ca_files.tls_cert_name.as_str())?;
+        let tls_cert_path = self.get_canonical_path(
+            self.env.server_dir(),
+            self.server_files.tls_cert_name.as_str(),
+        )?;
+        let tls_priv_path = self.get_canonical_path(
+            self.env.server_dir(),
+            self.server_files.tls_key_name.as_str(),
+        )?;
+        let tss_priv_path = self.get_canonical_path(
+            self.env.server_dir(),
+            self.server_files.sign_priv_key_name.as_str(),
+        )?;
+        let ca_cert_path =
+            self.get_canonical_path(self.env.server_dir(), self.ca_files.tls_cert_name.as_str())?;
 
         let default = ServerConfig::new(
             NetworkConfig::new(String::from(DEFAULT_SERVER_IP_STR), DEFAULT_SERVER_IP_PORT),
@@ -689,7 +701,10 @@ impl Generator {
             DEFAULT_SERVER_IP_STR,
             false,
             self.get_canonical_path(self.env.client_dir(), self.ca_files.tls_cert_name.as_str())?,
-            self.get_canonical_path(self.env.client_dir(), self.server_files.sign_pub_key_name.as_str())?,
+            self.get_canonical_path(
+                self.env.client_dir(),
+                self.server_files.sign_pub_key_name.as_str(),
+            )?,
         );
 
         let toml_default = toml::to_string_pretty(&default)
