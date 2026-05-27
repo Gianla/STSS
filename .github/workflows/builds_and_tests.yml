@@ -1,4 +1,4 @@
-name: Build CI (Cross-Platform)
+name: CI (Build & Test)
 
 on:
   push:
@@ -10,8 +10,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    name: Build on ${{ matrix.os }} (${{ matrix.target }})
+  build_and_test:
+    name: Build & Test on ${{ matrix.os }} (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -23,7 +23,6 @@ jobs:
             target: x86_64-pc-windows-msvc
           - os: macos-latest
             target: x86_64-apple-darwin
-          
           - os: ubuntu-latest
             target: i686-unknown-linux-gnu
           - os: windows-latest
@@ -47,8 +46,10 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
-          # Specifichiamo il target nella cache per evitare conflitti
           key: ${{ matrix.target }}
 
       - name: Exec Build
         run: cargo build --workspace --target ${{ matrix.target }} --verbose
+
+      - name: Exec Test
+        run: cargo test --workspace --target ${{ matrix.target }} --verbose
