@@ -2,7 +2,7 @@ name: Test CI (Cross-Platform)
 
 on:
   workflow_run:
-    workflows: ["Build CI (Cross-Platform)"] # Deve coincidere esattamente con il nome del workflow di build
+    workflows: ["Build CI (Cross-Platform)"]
     types:
       - completed
 
@@ -37,7 +37,6 @@ jobs:
       - name: Code checkout
         uses: actions/checkout@v4
         with:
-          # FONDAMENTALE per le Pull Request: assicura di testare il codice della PR, non del main
           ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Install 32-bit multilib (Linux only)
