@@ -1,3 +1,4 @@
+pub mod config;
 mod small_server;
 
 fn main() {

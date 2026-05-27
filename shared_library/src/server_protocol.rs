@@ -57,11 +57,10 @@ pub enum Response {
     SignInFailed(SignInError),
     NotLoggedIn,
     TokenCount(u64),
-    TokenAmountTooHigh(u64),
+    TokenAmountTooHigh,
     NotEnoughTokens,
     Token { sign: Vec<u8>, timestamp: Timestamp },
     OperationError(String),
-    ServerIsShuttingDown,
 }
 
 const MAX_ALLOCATION_SIZE: usize = 4 * 1024 * 1024;

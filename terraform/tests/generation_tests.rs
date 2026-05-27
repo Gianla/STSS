@@ -60,8 +60,9 @@ fn test_fails_if_root_directory_already_exists() {
     let env = EnvironmentGeneratorBuilder::build_default(&root_path);
     let server_files = AnyServerFiles::default("server_").unwrap();
     let ca_files = AnyServerFiles::default("ca_").unwrap();
+    let client_files =  ClientFiles::default("im_non_existent.tetext").unwrap();
 
-    let generator = Generator::new_from_files(server_files, ca_files, env).unwrap();
+    let generator = Generator::new_from_files(server_files, ca_files, client_files, env).unwrap();
     let result = generator.generate_all();
 
     assert!(
@@ -89,8 +90,9 @@ fn test_successful_generation_from_scratch() {
     let env = EnvironmentGeneratorBuilder::build_default(&root_path);
     let server_files = AnyServerFiles::default("server_").unwrap();
     let ca_files = AnyServerFiles::default("ca_").unwrap();
+    let client_files = ClientFiles::default("config.toml").unwrap();
 
-    let generator = Generator::new_from_files(server_files, ca_files, env).unwrap();
+    let generator = Generator::new_from_files(server_files, ca_files, client_files, env).unwrap();
 
     assert!(
         generator.generate_all().is_ok(),
@@ -105,6 +107,7 @@ fn test_successful_generation_from_scratch() {
     let client_dir = root_path.join(DEFAULT_CLIENT_ENV_SUBDIR);
     assert!(client_dir.join("ca_tls_certificate.pem").exists());
     assert!(client_dir.join("server_rsa_pub_key.pem").exists());
+    assert!(client_dir.join("config.toml").exists());
 
     let server_dir = root_path.join(DEFAULT_SERVER_ENV_SUBDIR);
     assert!(server_dir.join("server_tls_private_key.pem").exists());
@@ -116,6 +119,7 @@ fn test_successful_generation_from_scratch() {
     let ca_dir = root_path.join(DEFAULT_CA_ENV_SUBDIR);
     assert!(ca_dir.join("ca_tls_certificate.pem").exists());
     assert!(ca_dir.join("ca_tls_private_key.pem").exists());
+
 }
 
 #[test]
@@ -126,8 +130,9 @@ fn test_generator_fails_with_equal_prefixes() {
     let same_prefix = "same_prefix_";
     let server_files = AnyServerFiles::default(same_prefix).unwrap();
     let ca_files = AnyServerFiles::default(same_prefix).unwrap();
+    let client_files =  ClientFiles::default("config.toml").unwrap();
 
-    let result = Generator::new_from_files(server_files, ca_files, env);
+    let result = Generator::new_from_files(server_files, ca_files, client_files, env);
 
     assert!(
         matches!(result, Err(GeneratorCreationError::EqualPrefixes)),

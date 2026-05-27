@@ -1,14 +1,14 @@
 //! Main user of terraform::lib.rs, as well as a simple wrapper around it.
 
 use clap::Parser;
-use std::io::{self, Write, Error};
+use std::io::{self, Error, Write};
 use std::path::PathBuf;
 
-use terraform::{AnyServerFiles, EnvironmentGeneratorBuilder, Generator};
+use terraform::{AnyServerFiles, ClientFiles, EnvironmentGeneratorBuilder, FileSystemName, FileSystemNameError, Generator};
 
 /// Wrapper to craft error easily.
 fn main_error(msg: impl AsRef<str>) -> io::Result<()> {
-    Err( Error::other(msg.as_ref()) )
+    Err(Error::other(msg.as_ref()))
 }
 
 /// CLI tool to bootstrap the TSA Project simulation environment.
@@ -45,7 +45,11 @@ fn main() -> io::Result<()> {
 
     let mut stdout = io::stdout().lock();
 
-    writeln!(stdout, "Initializing the environment in directory: {:?}", cli.root)?;
+    writeln!(
+        stdout,
+        "Initializing the environment in directory: {:?}",
+        cli.root
+    )?;
 
     // Build the EnvironmentGenerator.
     let mut env_builder = EnvironmentGeneratorBuilder::from_simulation_dir(&cli.root);
@@ -104,24 +108,30 @@ fn main() -> io::Result<()> {
             return main_error(format!("Invalid CA prefix: {}", e));
         }
     };
+    
+    let static_client_toml_name = FileSystemName::try_from("config.toml")
+        .expect("this should never fail");
+
+    let client_files = ClientFiles::new(static_client_toml_name);
 
     // Instantiate the generator and start the process.
-    let generator = match Generator::new_from_files(server_files, ca_files, env) {
+    let generator = match Generator::new_from_files(server_files, ca_files, client_files, env) {
         Ok(g) => g,
         Err(e) => {
             return main_error(format!("Failed to initialize the generator: {}", e));
         }
     };
 
-    writeln!(stdout, "Generating keys, certificates, and configuration files...")?;
+    writeln!(
+        stdout,
+        "Generating keys, certificates, and configuration files..."
+    )?;
 
     match generator.generate_all() {
         Ok(_) => {
             writeln!(stdout, "Environment generated successfully!")?;
             Ok(())
         }
-        Err(e) => {
-            main_error(format!("Fatal error during generation: {}", e))
-        }
+        Err(e) => main_error(format!("Fatal error during generation: {}", e)),
     }
 }

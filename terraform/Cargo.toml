@@ -8,6 +8,7 @@ thiserror = "2.0.18"
 rsa = "0.10.0-rc.18"
 rcgen = "0.14.8"
 server = { path = "../server" }
+client_cli = { path = "../client_cli" }
 const_format = "0.2.36"
 rand = "0.10.1"
 toml = "1.1.2"

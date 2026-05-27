@@ -183,7 +183,7 @@ fn send_error_logger(send_err: std::io::Error, address: &SocketAddr) -> Result<(
     }
 }
 
-/// Extracts the next request from a framed stream, properly adapting to the function's type
+/// Extracts the next send_request from a framed stream, properly adapting to the function's type
 /// ecosystem by the use of generics.
 async fn fetch_next_request<S>(
     stream: &mut Framed<S, LengthDelimitedCodec>,
@@ -592,7 +592,7 @@ where
                     }
 
                     Err(token_add_error) => match token_add_error {
-                        AddTokensError::TokenOverflow => Response::TokenAmountTooHigh(tokens),
+                        AddTokensError::TokenOverflow => Response::TokenAmountTooHigh,
                         AddTokensError::UserDoesNotExist => {
                             return Err(HandlerError::Domain {
                                 username: Some(session.username.clone()),
@@ -1129,7 +1129,7 @@ mod tests {
 
         let _ = client_framed.next().await;
 
-        // First signature request (Consumes the only available token)
+        // First signature send_request (Consumes the only available token)
         client_framed
             .send(Request::SignHash([1u8; 32]).serialize().unwrap())
             .await
@@ -1138,7 +1138,7 @@ mod tests {
         let resp1 = Response::deserialize(client_framed.next().await.unwrap().unwrap()).unwrap();
         assert!(matches!(resp1, Response::Token { .. })); // Success!
 
-        // Second signature request (Token balance is now zero)
+        // Second signature send_request (Token balance is now zero)
         client_framed
             .send(Request::SignHash([1u8; 32]).serialize().unwrap())
             .await

@@ -5,6 +5,7 @@ use crate::connection_handler::{HandlerError, NetworkError, ParsingError, STSSer
 use crate::database::{DataBaseBuildError, DataBaseLocation, ServerDataBaseBuilder};
 use crate::server::NetworkPort::{AnyFreePort, Port};
 use crate::time_oracle::{TimeOracleBundle, TimeSyncWorker};
+
 use rsa::sha2::{Digest, Sha256};
 use rsa::{Pkcs1v15Sign, RsaPrivateKey};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -655,6 +656,21 @@ mod tests {
     use tokio::sync::oneshot;
     use tokio_rustls::TlsConnector;
 
+    static INIT_CRYPTO: std::sync::Once = std::sync::Once::new();
+
+    /// Installs the cryptographic provider globally for the test process.
+    /// Rustls 0.23 requires this to avoid panics when building Server/Client configs.
+    fn setup_test_crypto() {
+        INIT_CRYPTO.call_once(|| {
+            // Try to install 'ring' provider (most common fallback with the rsa crate)
+            let _ = rustls::crypto::ring::default_provider().install_default();
+
+            // NOTE: If the test still panics or doesn't compile because you use aws-lc-rs,
+            // comment the line above and uncomment the line below:
+            // let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        });
+    }
+
     impl ServerContext {
         /// Generates a valid, in-memory ServerContext strictly for testing purposes.
         /// This bypasses the filesystem completely, generating self-signed certificates
@@ -754,12 +770,14 @@ mod tests {
     }
 
     async fn connect_with_retry(addr: &str) -> TcpStream {
-        let attempts: u32 = 0;
+        setup_test_crypto();
+
+        let mut attempts: u32 = 0;
         loop {
             match TcpStream::connect(addr).await {
                 Ok(stream) => return stream,
                 Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
-                    let _ = attempts.wrapping_add(1);
+                    attempts = attempts.wrapping_add(1);
                     if attempts > 100 {
                         panic!("Server didn't open the port in time: {}", e);
                     }
@@ -788,10 +806,9 @@ mod tests {
     async fn test_graceful_shutdown() {
         let test_port = 8081;
         let (tx, rx) = oneshot::channel();
-
-        // Spawn the server in a blocking thread to avoid the "runtime within a runtime" panic.
         let context = ServerContext::dummy(test_port);
 
+        // Spawn the server in a blocking thread to avoid the "runtime within a runtime" panic.
         let server_handle = tokio::task::spawn_blocking(move || {
             let server = STSServer::build_from_context(context).expect("Server failed to build");
 
@@ -802,13 +819,16 @@ mod tests {
                 .expect("Server encountered a run error");
         });
 
-        // Give the server enough time to bind the TCP listener
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Give the server enough time to bind the TCP listener.
+        let addr = format!("127.0.0.1:{}", test_port);
+        let stream = connect_with_retry(&addr).await;
 
-        // Trigger the shutdown signal
+        // Brutally drop it.
+        drop(stream);
+
+        // Now we can send the end signal.
         tx.send(()).expect("Failed to send shutdown signal");
 
-        // Await the blocking task with a timeout to ensure it doesn't hang forever
         let result = tokio::time::timeout(Duration::from_secs(3), server_handle).await;
 
         assert!(

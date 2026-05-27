@@ -7,13 +7,13 @@ use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
 use rsa::{RsaPrivateKey, RsaPublicKey};
 use std::collections::HashSet;
 use std::convert::Into;
-use std::env::current_dir;
 use std::fmt::Formatter;
 use std::path::{Component, Path, PathBuf};
 use std::{fmt, fs, io};
+use std::num::NonZero;
 use thiserror::Error;
-
-use server::config::{Config, KeysConfig, NetworkConfig, RuntimeConfig, TimeOracleConfig};
+use server::config::{Config as ServerConfig, KeysConfig, NetworkConfig, RuntimeConfig, TimeOracleConfig};
+use client_cli::config::{Config as ClientConfig};
 
 /// Abstracts a String into a filesystem name, which can be a file or the name of a single
 /// directory. This is useful when working with directories and files,
@@ -105,6 +105,8 @@ impl TryFrom<String> for FileSystemName {
 pub const DEFAULT_CLIENT_ENV_SUBDIR: &str = "client_env";
 pub const DEFAULT_SERVER_ENV_SUBDIR: &str = "server_env";
 pub const DEFAULT_CA_ENV_SUBDIR: &str = "ca_env";
+pub const DEFAULT_SERVER_IP_STR: &str = "127.0.0.1";
+pub const DEFAULT_SERVER_IP_PORT: u16 = 8080;
 
 /// Groups the folders for the three actors.
 pub struct EnvironmentGenerator {
@@ -310,15 +312,32 @@ impl AnyServerFiles {
     }
 }
 
-pub fn heuristic_working_threads(thread_limits: Option<(usize, usize)>) -> (bool, usize) {
-    // heuristic to decide whether to include cryptographic threads or not. In general, for
-    // systems that supports hardware acceleration, we decide not to include them since
-    // cryptographical operations won't take long (and, so, a separated thread).
-    // Otherwise, we reserve some threads for specific signing operations so that the server
-    // will keep going with connections.
+pub struct ClientFiles {
+    toml_file: FileSystemName,
+}
 
-    // for some unknown reasons, MacOS is the only operating system pretending to put std::arch::
-    // as a prefix before every feature detection. Thank you MacOS for being the incredible,
+impl ClientFiles {
+    pub fn new(toml_file: impl Into<FileSystemName>) -> Self {
+        Self { toml_file: toml_file.into() }
+    }
+
+    pub fn default<T>(toml_file: T) -> Result<Self, T::Error>
+    where
+        T: TryInto<FileSystemName>,
+    {
+        let file = toml_file.try_into()?;
+        Ok( Self {toml_file: file } )
+    }
+}
+
+/// Heuristic to decide whether to include cryptographic threads or not. In general, for
+/// systems that supports hardware acceleration, we decide not to include them since
+/// cryptographical operations won't take long (and, so, a separated thread).
+/// Otherwise, we reserve some threads for specific signing operations so that the server
+/// will keep going with connections.
+pub fn heuristic_working_threads(thread_limits: Option<(usize, usize)>) -> (bool, usize) {
+    // for some unknown reasons, macOS is the only operating system pretending to put std::arch::
+    // as a prefix before every feature detection. Thank you, macOS, for being the incredible,
     // beautiful operating system that you pretend to be but aren't.
     #[cfg(target_arch = "x86_64")]
     // both adx and bmi2 are instruction sets that deals well with big numbers operations, so
@@ -437,6 +456,7 @@ pub enum GeneratorCreationError {
 pub struct Generator {
     server_files: AnyServerFiles,
     ca_files: AnyServerFiles,
+    client_files: ClientFiles,
     env: EnvironmentGenerator,
 }
 
@@ -444,14 +464,17 @@ impl Generator {
     pub fn new_from_files(
         server_files: AnyServerFiles,
         ca_files: AnyServerFiles,
+        client_files: ClientFiles,
         env: EnvironmentGenerator,
     ) -> Result<Self, GeneratorCreationError> {
         if server_files._given_prefix == ca_files._given_prefix {
             return Err(GeneratorCreationError::EqualPrefixes);
         }
+
         Ok(Self {
             server_files,
             ca_files,
+            client_files,
             env,
         })
     }
@@ -466,6 +489,7 @@ impl Generator {
     /// Wrapper to generate both the server toml and the CA toml.
     fn generate_tomls(&self) -> Result<(), TomlGenError> {
         self.generate_server_toml(None)?;
+        self.generate_client_toml()?;
         self.generate_ca_toml()?;
 
         Ok(())
@@ -485,9 +509,11 @@ impl Generator {
         let mut ca_params = CertificateParams::new(vec!["Root CA".to_string()])
             .map_err(|e| KeyGenError::CACertificateCreation(e.to_string()))?;
         ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+
         ca_params
             .distinguished_name
             .push(DnType::OrganizationName, "University of Pisa");
+
         ca_params
             .distinguished_name
             .push(DnType::CommonName, "CyberSecurity Project");
@@ -496,6 +522,7 @@ impl Generator {
         let ca_cert = ca_params
             .self_signed(&ca_keypair)
             .map_err(|e| KeyGenError::CACertificateCreation(e.to_string()))?;
+
         let ca_cert_pem = ca_cert.pem();
 
         // create the issuer: this is useful to already-sign the server.
@@ -504,15 +531,19 @@ impl Generator {
         // 2. Server TLS generation.
 
         // Generate Server TLS KeyPair.
-        let server_tls_keypair = KeyPair::generate_for(&PKCS_ED25519).map_err(KeyGenError::Tls)?;
+        let server_tls_keypair = KeyPair::generate_for(&PKCS_ED25519)
+            .map_err(KeyGenError::Tls)?;
+
         let server_tls_key_pem = server_tls_keypair.serialize_pem();
 
         // create the server's Certificate Params.
-        let mut server_tls_params = CertificateParams::new(vec!["127.0.0.1".to_string()])
+        let mut server_tls_params = CertificateParams::new(vec![DEFAULT_SERVER_IP_STR.to_string()])
             .map_err(|e| KeyGenError::CACertificateCreation(e.to_string()))?;
+
         server_tls_params
             .distinguished_name
             .push(DnType::OrganizationName, "University of Pisa");
+
         server_tls_params
             .distinguished_name
             .push(DnType::CommonName, "TSA Server");
@@ -521,6 +552,7 @@ impl Generator {
         let server_tls_cert = server_tls_params
             .signed_by(&server_tls_keypair, &ca_issuer)
             .map_err(|e| KeyGenError::ServerCertificateCreation(e.to_string()))?;
+
         let server_tls_cert_pem = server_tls_cert.pem();
 
         // 3. Server TSA generation.
@@ -604,6 +636,13 @@ impl Generator {
         Ok(())
     }
 
+    fn get_canonical_path(&self, dir: &Path, file_name: &str) -> Result<PathBuf, TomlGenError> {
+        dir
+            .join(file_name)
+            .canonicalize()
+            .map_err(|e| TomlGenError::Canonicalize(file_name.to_string(), e))
+    }
+
     /// Uses the paths to generate the default toml.
     /// thread_limits refers to the two numbers in which the heuristic have to stay in:
     /// if it calculates a number outside of this range, the result will fall to one of the two
@@ -615,21 +654,13 @@ impl Generator {
     ) -> Result<(), TomlGenError> {
         let (is_crypto_hardware_accelerated, n_threads) = heuristic_working_threads(thread_limits);
 
-        let get_canonical_path = |file_name: &str| {
-            self.env
-                .server_dir
-                .join(file_name)
-                .canonicalize()
-                .map_err(|e| TomlGenError::Canonicalize(file_name.to_string(), e))
-        };
+        let tls_cert_path = self.get_canonical_path(self.env.server_dir(), self.server_files.tls_cert_name.as_str())?;
+        let tls_priv_path = self.get_canonical_path(self.env.server_dir(), self.server_files.tls_key_name.as_str())?;
+        let tss_priv_path = self.get_canonical_path(self.env.server_dir(), self.server_files.sign_priv_key_name.as_str())?;
+        let ca_cert_path = self.get_canonical_path(self.env.server_dir(), self.ca_files.tls_cert_name.as_str())?;
 
-        let tls_cert_path = get_canonical_path(self.server_files.tls_cert_name.as_str())?;
-        let tls_priv_path = get_canonical_path(self.server_files.tls_key_name.as_str())?;
-        let tss_priv_path = get_canonical_path(self.server_files.sign_priv_key_name.as_str())?;
-        let ca_cert_path = get_canonical_path(self.ca_files.tls_cert_name.as_str())?;
-
-        let default = Config::new(
-            NetworkConfig::new(String::from("127.0.0.1"), 8080),
+        let default = ServerConfig::new(
+            NetworkConfig::new(String::from(DEFAULT_SERVER_IP_STR), DEFAULT_SERVER_IP_PORT),
             RuntimeConfig::new(
                 n_threads,
                 if is_crypto_hardware_accelerated { 0 } else { 1 },
@@ -643,6 +674,28 @@ impl Generator {
             .map_err(|e| TomlGenError::TomlGeneration(e.to_string()))?;
 
         let final_path = self.env.server_dir.join(&self.server_files.toml_name);
+
+        fs::write(&final_path, toml_default)
+            .map_err(|e| TomlGenError::Io(final_path.to_string_lossy().to_string(), e))
+    }
+
+    fn generate_client_toml(&self) -> Result<(), TomlGenError> {
+        let default = ClientConfig::new(
+            String::from(DEFAULT_SERVER_IP_STR),
+            NonZero::new(DEFAULT_SERVER_IP_PORT).expect(concatcp!(
+                "port is zero but this should be impossible since \"{}\" is hardcoded",
+                DEFAULT_SERVER_IP_PORT
+            )),
+            DEFAULT_SERVER_IP_STR,
+            false,
+            self.get_canonical_path(self.env.client_dir(), self.ca_files.tls_cert_name.as_str())?,
+            self.get_canonical_path(self.env.client_dir(), self.server_files.sign_pub_key_name.as_str())?,
+        );
+
+        let toml_default = toml::to_string_pretty(&default)
+            .map_err(|e| TomlGenError::TomlGeneration(e.to_string()))?;
+
+        let final_path = self.env.client_dir.join(&self.client_files.toml_file);
 
         fs::write(&final_path, toml_default)
             .map_err(|e| TomlGenError::Io(final_path.to_string_lossy().to_string(), e))

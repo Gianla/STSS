@@ -353,7 +353,7 @@ mod tests {
             let _ = worker.start_syncing().await;
         });
 
-        // Wait for the client request.
+        // Wait for the client send_request.
         let mut buf = [0u8; 1024];
         let (size, client_addr) = mock_server.recv_from(&mut buf).await.unwrap();
 
@@ -362,7 +362,7 @@ mod tests {
             "The client should send at least a 48 byte payload."
         );
 
-        // Build the mock response based on the client request.
+        // Build the mock response based on the client send_request.
         let mut response = [0u8; 48];
         response.copy_from_slice(&buf[0..48]);
 
