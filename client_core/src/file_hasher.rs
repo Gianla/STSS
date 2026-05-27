@@ -1,10 +1,9 @@
 use crate::client::STSSClient;
-use rsa::{Pkcs1v15Sign, RsaPublicKey};
+use rsa::Pkcs1v15Sign;
 use sha2::{Digest, Sha256};
 use shared_library::safe_read::{SafeFileReader, SafeReadError};
 use shared_library::server_protocol::Timestamp;
 use std::path::PathBuf;
-use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Debug, Error)]

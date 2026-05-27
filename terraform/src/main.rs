@@ -5,8 +5,7 @@ use std::io::{self, Error, Write};
 use std::path::PathBuf;
 
 use terraform::{
-    AnyServerFiles, ClientFiles, EnvironmentGeneratorBuilder, FileSystemName, FileSystemNameError,
-    Generator,
+    AnyServerFiles, ClientFiles, EnvironmentGeneratorBuilder, FileSystemName, Generator,
 };
 
 /// Wrapper to craft error easily.

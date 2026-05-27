@@ -6,7 +6,6 @@ use shared_library::safe_read::{SafeReadError, safe_read};
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZero;
 use std::path::PathBuf;
-use std::sync::Arc;
 use thiserror::Error;
 
 const TOML_EXT: Option<&str> = Some(".toml");
@@ -72,7 +71,7 @@ pub struct KeyConfig {
 
 impl Config {
     pub fn new(
-        server_ip: String,
+        server_ip: impl Into<String>,
         server_port: NonZero<u16>,
         server_certificate_name: impl Into<String>,
         trust_roots_certificates: bool,
@@ -81,7 +80,7 @@ impl Config {
     ) -> Self {
         Self {
             timestamp: TimestampConfig {
-                server_ip: "".to_string(),
+                server_ip: server_ip.into(),
                 server_port: server_port.get(),
                 server_certificate_name: server_certificate_name.into(),
                 trust_roots_certificates,

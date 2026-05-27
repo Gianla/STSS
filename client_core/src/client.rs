@@ -1,11 +1,10 @@
 use bytes::Bytes;
 use futures::StreamExt;
 use futures::sink::SinkExt;
-use rsa::{RsaPrivateKey, RsaPublicKey};
+use rsa::RsaPublicKey;
 use rustls::pki_types::CertificateDer;
-use shared_library::server_protocol::{LoginError, Request, Response, SignInError, Timestamp};
+use shared_library::server_protocol::{Request, Response, Timestamp};
 use std::net::SocketAddr;
-use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::net::TcpStream;
@@ -50,10 +49,6 @@ impl ClientContext {
                 trust_roots_cert,
             },
         }
-    }
-
-    pub(crate) fn server_rsa_public_key(&self) -> &RsaPublicKey {
-        &self.keys.server_rsa_public_key
     }
 }
 

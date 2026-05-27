@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 thiserror = "2.0.18"
-toml = "1.1.2+spec-1.1.0"
+toml = "1.1.2"
 rustls-pemfile = "2.2.0"
 shared_library = { version = "0.1.0", path = "../shared_library" }
 client_core = { version = "0.1.0", path = "../client_core" }
