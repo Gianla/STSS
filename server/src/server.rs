@@ -263,12 +263,14 @@ pub enum STSServer {
     Slow(STSServerInstance<SlowSigner>),
 }
 
+/// Support .into() for accelerated instances.
 impl From<STSServerInstance<AcceleratedSigner>> for STSServer {
     fn from(value: STSServerInstance<AcceleratedSigner>) -> Self {
         STSServer::Accelerated(value)
     }
 }
 
+/// Support .into() for slow instances.
 impl From<STSServerInstance<SlowSigner>> for STSServer {
     fn from(value: STSServerInstance<SlowSigner>) -> Self {
         STSServer::Slow(value)
@@ -286,6 +288,10 @@ pub struct STSServerInstance<S: Signer> {
 }
 
 impl STSServer {
+    /// Builds a STSServerInstance starting from a context. 
+    /// This method abstracts the complexity of handling a slow or an accelerated signer, creating
+    /// either one or the other instance based on the config file (specifically, 
+    /// cryptography_threads). 
     pub fn build_from_context(
         ServerContext {
             address,
@@ -350,9 +356,9 @@ impl STSServer {
 
         rt_builder.enable_all();
 
-        let use_hardware_acceleration = cryptography_threads > 0;
+        let do_not_use_hardware_acceleration = cryptography_threads > 0;
 
-        if use_hardware_acceleration {
+        if do_not_use_hardware_acceleration {
             rt_builder.max_blocking_threads(cryptography_threads);
         }
 
@@ -379,7 +385,7 @@ impl STSServer {
 
         debug!("Server correctly built.");
 
-        if use_hardware_acceleration {
+        if do_not_use_hardware_acceleration {
             info!(
                 "Using a slow signer that uses a threadpool of {} threads. This solution is better \
                  if this system doesn't support hardware acceleration. If it is desired to use \
@@ -415,6 +421,7 @@ impl STSServer {
     }
 
     /// Public entry point to start the server in a blocking fashion.
+    /// Abstracts the complexity of having an accelerated or slow signer.
     pub fn run(self) -> Result<(), STSServerRunError> {
         match self {
             STSServer::Accelerated(server) => server.run(),
@@ -425,7 +432,7 @@ impl STSServer {
 
 impl<S> STSServerInstance<S>
 where
-    S: Signer + Clone + Send + 'static + std::marker::Sync,
+    S: Signer + Clone + Send + 'static + Sync,
 {
     /// Wrapper around the more complex run_with_signal(). run_with_signal() is needed in order to
     /// test the server with different stopping signals than ctrl+c. This function calls it with
@@ -560,7 +567,7 @@ where
                             )
                         })?;
 
-                // if the TLS handshake was successful, we further wrap the tls stream into a framed
+                // If the TLS handshake was successful, we further wrap the tls stream into a framed
                 // stream. A framed stream is an abstraction of a stream, where the first n bytes
                 // (usually n = 4) are used to identify the length of the message coded after those
                 // bytes. This way, an unreliable stream turns into an iterator yielding
@@ -577,7 +584,10 @@ where
                 if let Err(e) = conn_handler(new_address, framed_stream, &state_clone).await {
                     match e {
                         HandlerError::Domain { username, source } => {
-                            // Determine if the user was logged in or if they were still a guest
+                            // conn_handler() returns an HandlerError::Domain only when a server's 
+                            // serious issue was found. It does not return it if, for example, a 
+                            // user drops it connection or logs out: these cases are handled in the
+                            // other error branch.
                             let user_context =
                                 username.unwrap_or_else(|| "[Not Logged]".to_string());
 
@@ -591,6 +601,7 @@ where
                         }
 
                         HandlerError::Network(network_err) => match network_err {
+                            // Classical errors that might appear when a user misbehave in some way.
                             NetworkError::ConnectionDropped => {
                                 info!("{} disconnected.", new_address);
                             }

@@ -65,7 +65,7 @@ pub struct STSServerStateBuilder<S> {
 }
 
 impl STSServerStateBuilder<NoSignerYet> {
-    /// Returns a STSServerState with all the required data, bundled into a single state.
+    /// Returns a STSServerStateBuilder with all the required data, bundled into a single state.
     /// This method hides the complexity of dealing with Arcs and is useful only to conn_handler().
     pub fn from_bundle(
         database: ServerDataBase,
@@ -89,6 +89,7 @@ impl STSServerStateBuilder<NoSignerYet> {
         }
     }
 
+    /// Finalize the initialization by enriching the state with an accelerated signer.
     pub fn get_accelerated_build(self) -> STSServerState<AcceleratedSigner> {
         STSServerState {
             database: self.database,
@@ -100,6 +101,7 @@ impl STSServerStateBuilder<NoSignerYet> {
         }
     }
 
+    /// Finalize the initialization by enriching the state with a slow signer.
     pub fn get_slow_build(self) -> STSServerState<SlowSigner> {
         STSServerState {
             database: self.database,
@@ -342,7 +344,7 @@ where
                         // inside the hashmap. Furthermore, is atomic. This means that we don't
                         // need to lock on it to perform a .contains() and then an .insert() if the
                         // first was false. If this split operation wasn't locked, it would lead to
-                        // race conditions and security vulnerability (a user would have been able
+                        // race conditions and security vulnerabilities (a user would have been able
                         // to log twice).
                         if logged_users.insert(username.clone()) {
                             started_session = Some(Session::bundle(address, username));
@@ -387,7 +389,7 @@ where
 
                     Err(RegistrationError::InternalDataBase(e)) => {
                         return Err(HandlerError::Domain {
-                            username: None, // The user is not logged in yet
+                            username: None, // The user is not logged in yet, so we use None.
                             source: InternalError::Database(e),
                         });
                     }
@@ -398,7 +400,7 @@ where
                 }
             }
 
-            // To everything else, we have to answer that, at this stage, the user is not logged.
+            // At this stage, to any other request, we have to answer that the user is not logged.
             _ => Response::NotLoggedIn,
         };
 
@@ -413,7 +415,7 @@ where
         if let Some(session) = started_session {
             match session_handler(&session, &mut stream, state).await {
                 Err(error) => {
-                    // Propagate the error, but make sure to unlock the username first!
+                    // Propagate the error, but make sure to unlock the username first.
                     state.logged_users.remove(&session.username);
                     return Err(error);
                 }
@@ -576,6 +578,8 @@ where
                         }
                     };
 
+                    // Here we are using the generic signer, that can be both slow or accelerated.
+                    // The check is performed at compile time, super easy and fast.
                     match signer
                         .generate_timestamp_signature(signing_key, &raw_hash, timestamp)
                         .await
@@ -611,7 +615,7 @@ where
                                 // database operation fails too, an operator has to manually
                                 // rollback this.
                                 error!(
-                                    "Failed to refund 1 token to user {} after a signing \
+                                    "Failed to refund a token to user {} after a signing \
                                     failure: {:?}",
                                     username, refund_err
                                 );
