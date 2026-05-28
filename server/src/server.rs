@@ -288,10 +288,10 @@ pub struct STSServerInstance<S: Signer> {
 }
 
 impl STSServer {
-    /// Builds a STSServerInstance starting from a context. 
+    /// Builds a STSServerInstance starting from a context.
     /// This method abstracts the complexity of handling a slow or an accelerated signer, creating
-    /// either one or the other instance based on the config file (specifically, 
-    /// cryptography_threads). 
+    /// either one or the other instance based on the config file (specifically,
+    /// cryptography_threads).
     pub fn build_from_context(
         ServerContext {
             address,
@@ -584,8 +584,8 @@ where
                 if let Err(e) = conn_handler(new_address, framed_stream, &state_clone).await {
                     match e {
                         HandlerError::Domain { username, source } => {
-                            // conn_handler() returns an HandlerError::Domain only when a server's 
-                            // serious issue was found. It does not return it if, for example, a 
+                            // conn_handler() returns an HandlerError::Domain only when a server's
+                            // serious issue was found. It does not return it if, for example, a
                             // user drops it connection or logs out: these cases are handled in the
                             // other error branch.
                             let user_context =
@@ -686,21 +686,6 @@ mod tests {
     use tokio::net::TcpStream;
     use tokio::sync::oneshot;
     use tokio_rustls::TlsConnector;
-
-    static INIT_CRYPTO: std::sync::Once = std::sync::Once::new();
-
-    /// Installs the cryptographic provider globally for the test process.
-    /// Rustls 0.23 requires this to avoid panics when building Server/Client configs.
-    fn setup_test_crypto() {
-        INIT_CRYPTO.call_once(|| {
-            // Try to install 'ring' provider (most common fallback with the rsa crate)
-            let _ = rustls::crypto::ring::default_provider().install_default();
-
-            // NOTE: If the test still panics or doesn't compile because you use aws-lc-rs,
-            // comment the line above and uncomment the line below:
-            // let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-        });
-    }
 
     /// Let tests start the server with their custom signals.
     impl STSServer {
@@ -814,8 +799,6 @@ mod tests {
     }
 
     async fn connect_with_retry(addr: &str) -> TcpStream {
-        setup_test_crypto();
-
         let mut attempts: u32 = 0;
         loop {
             match TcpStream::connect(addr).await {

@@ -8,8 +8,8 @@ use std::num::NonZero;
 use std::path::PathBuf;
 use thiserror::Error;
 
-const TOML_EXT: Option<&str> = Some(".toml");
-const PEM_EXT: Option<&str> = Some(".pem");
+const TOML_EXT: Option<&str> = Some("toml");
+const PEM_EXT: Option<&str> = Some("pem");
 
 /// Possible errors while reading the toml file.
 #[derive(Error, Debug)]

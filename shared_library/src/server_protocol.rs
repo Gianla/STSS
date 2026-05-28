@@ -18,6 +18,31 @@ impl Timestamp {
     }
 }
 
+impl TryFrom<i64> for Timestamp {
+    type Error = ();
+
+    fn try_from(value: i64) -> Result<Self, Self::Error> {
+        if value < 0 {
+            Err(())
+        } else {
+            Ok(Self(value as u128))
+        }
+    }
+}
+
+/// Used when a user asks their history record(s).
+#[derive(Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct HistoryRecord {
+    hash: [u8; 32],
+    timestamp: Timestamp,
+}
+
+impl HistoryRecord {
+    pub fn new(hash: [u8; 32], timestamp: Timestamp) -> Self {
+        Self { hash, timestamp }
+    }
+}
+
 /// Possible errors when a user try to log in.
 #[derive(Error, Debug, SchemaWrite, SchemaRead)]
 pub enum LoginError {
@@ -47,6 +72,7 @@ pub enum Request {
     SignHash([u8; 32]),
     PurchaseTokens(u64),
     HowManyTokensDoIHave,
+    History,
 }
 
 /// Responses sent by the server.

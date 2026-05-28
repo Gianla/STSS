@@ -686,6 +686,7 @@ where
                     });
                 }
             },
+            Request::History => todo!(),
         };
 
         let serialized_response = response

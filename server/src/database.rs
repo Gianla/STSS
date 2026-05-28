@@ -7,9 +7,10 @@ use argon2::{
     password_hash::{PasswordHash, PasswordVerifier},
     Argon2, PasswordHasher,
 };
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
+use shared_library::server_protocol::{HistoryRecord, Timestamp};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use sqlx::{FromRow, SqlitePool};
+use sqlx::{FromRow, Row, SqlitePool};
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::{fs, io};
@@ -99,6 +100,25 @@ pub enum SubtractTokensError {
     InternalDataBase(#[from] InternalDataBaseError),
 }
 
+/// Errors that may arise when getting the user's history.
+#[derive(Error, Debug)]
+pub enum UserHistoryError {
+    #[error("user does not exist")]
+    UserDoesNotExist,
+
+    #[error("record is empty")]
+    EmptyRecord,
+
+    #[error("the specified user has an hash with invalid timestamp: {0}")]
+    TimestampIntegrityViolated(i64),
+
+    #[error("the specified user has an invalid hash: {0:?}")]
+    HashIntegrityViolated(String),
+
+    #[error(transparent)]
+    InternalDataBase(#[from] InternalDataBaseError),
+}
+
 /// To directly convert a UpdateTokensError into an InternalDataBaseError.
 impl From<sqlx::Error> for AddTokensError {
     fn from(err: sqlx::Error) -> Self {
@@ -110,6 +130,13 @@ impl From<sqlx::Error> for AddTokensError {
 impl From<sqlx::Error> for SubtractTokensError {
     fn from(err: sqlx::Error) -> Self {
         SubtractTokensError::InternalDataBase(InternalDataBaseError::Sql(err))
+    }
+}
+
+/// To directly convert a UserHistoryError into an InternalDataBaseError.
+impl From<sqlx::Error> for UserHistoryError {
+    fn from(err: sqlx::Error) -> Self {
+        UserHistoryError::InternalDataBase(InternalDataBaseError::Sql(err))
     }
 }
 
@@ -305,6 +332,59 @@ impl ServerDataBase {
 
         Ok(resulting_tokens as u64)
     }
+
+    pub async fn get_user_history(
+        &self,
+        username: &str,
+    ) -> Result<Vec<HistoryRecord>, UserHistoryError> {
+        let mut tx = self.connection_pool.begin().await?;
+
+        let user_exists: Option<i32> = sqlx::query_scalar("SELECT 1 FROM users WHERE username = ?")
+            .bind(username)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(InternalDataBaseError::from)?;
+
+        if user_exists.is_none() {
+            return Err(UserHistoryError::UserDoesNotExist);
+        }
+
+        let mut stream = sqlx::query(
+            r#"
+            SELECT hash, timestamp
+            FROM history
+            WHERE username = ?
+            ORDER BY timestamp DESC
+            LIMIT 100
+            "#,
+        )
+        .bind(username)
+        .fetch(&mut *tx);
+
+        let mut records = Vec::new();
+
+        while let Some(row_result) = stream.next().await {
+            let row = row_result?;
+
+            let raw_timestamp: i64 = row.get("timestamp");
+            let timestamp = Timestamp::try_from(raw_timestamp)
+                .map_err(|_| UserHistoryError::TimestampIntegrityViolated(raw_timestamp))?;
+
+            let hash_slice: &[u8] = row.get("hash");
+
+            let hash_bytes: [u8; 32] = hash_slice
+                .try_into()
+                .map_err(|_| UserHistoryError::HashIntegrityViolated(hex::encode(hash_slice)))?;
+
+            records.push(HistoryRecord::new(hash_bytes, timestamp));
+        }
+
+        if records.is_empty() {
+            return Err(UserHistoryError::EmptyRecord);
+        }
+
+        Ok(records)
+    }
 }
 
 /// Possible errors while properly building the database.
@@ -401,7 +481,7 @@ impl ServerDataBaseBuilder {
             CREATE TABLE IF NOT EXISTS history (
                 username TEXT NOT NULL,
                 timestamp INTEGER NOT NULL,
-                hash TEXT NOT NULL,
+                hash BLOB NOT NULL,
 
                 PRIMARY KEY (username, timestamp),
                 CONSTRAINT fk_user FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE
@@ -725,5 +805,91 @@ mod tests {
             matches!(err, DataBaseBuildError::UnexpectedTable(name) if name == "secret_backdoor"),
             "The DB should have rejected the unexpected table!"
         );
+    }
+
+    #[tokio::test]
+    async fn test_user_does_not_exist() {
+        let db = setup_memory_db().await;
+
+        let result = db.get_user_history("ghost_user").await;
+
+        assert!(matches!(result, Err(UserHistoryError::UserDoesNotExist)));
+    }
+
+    #[tokio::test]
+    async fn test_user_exists_but_empty_record() {
+        let db = setup_memory_db().await;
+        let username = "alice";
+
+        // Insert user without a history.
+        sqlx::query("INSERT INTO users (username, password_hash, available_tokens, registered_from_ip) VALUES (?, 'dummy_hash', 10, '127.0.0.1')")
+            .bind(username)
+            .execute(&db.connection_pool)
+            .await
+            .unwrap();
+
+        let result = db.get_user_history(username).await;
+
+        assert!(matches!(result, Err(UserHistoryError::EmptyRecord)));
+    }
+
+    #[tokio::test]
+    async fn test_successful_history_retrieval() {
+        let db = setup_memory_db().await;
+        let username = "bob";
+
+        // Insert user.
+        sqlx::query("INSERT INTO users (username, password_hash, available_tokens, registered_from_ip) VALUES (?, 'dummy', 10, '127.0.0.1')")
+            .bind(username)
+            .execute(&db.connection_pool)
+            .await
+            .unwrap();
+
+        // Prepare a valid hash.
+        let valid_hash = [1u8; 32];
+        let timestamp = 1680000000i64;
+
+        // Insert it into history.
+        sqlx::query("INSERT INTO history (username, timestamp, hash) VALUES (?, ?, ?)")
+            .bind(username)
+            .bind(timestamp)
+            .bind(valid_hash.as_slice())
+            .execute(&db.connection_pool)
+            .await
+            .unwrap();
+
+        let result = db.get_user_history(username).await;
+
+        assert!(result.is_ok(), "function should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_hash_integrity_violation() {
+        let db = setup_memory_db().await;
+        let username = "charlie";
+
+        sqlx::query("INSERT INTO users (username, password_hash, available_tokens, registered_from_ip) VALUES (?, 'dummy', 10, '127.0.0.1')")
+            .bind(username)
+            .execute(&db.connection_pool)
+            .await
+            .unwrap();
+
+        // Prepare an invalid hash.
+        let invalid_hash = [2u8; 10];
+
+        sqlx::query("INSERT INTO history (username, timestamp, hash) VALUES (?, ?, ?)")
+            .bind(username)
+            .bind(1680000000i64)
+            .bind(invalid_hash.as_slice())
+            .execute(&db.connection_pool)
+            .await
+            .unwrap();
+
+        let result = db.get_user_history(username).await;
+
+        assert!(matches!(
+            result,
+            Err(UserHistoryError::HashIntegrityViolated(_))
+        ));
     }
 }

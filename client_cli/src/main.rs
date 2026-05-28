@@ -13,7 +13,7 @@ use std::path::PathBuf;
 #[command(about = "Implementation of the client from command line interface (CLI).", long_about = None)]
 struct Args {
     #[arg(short, long, value_name = "config")]
-    file: PathBuf,
+    config: PathBuf,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -21,7 +21,7 @@ async fn main() -> Result<(), anyhow::Error> {
     let args = Args::parse();
 
     let config =
-        Config::from_file(args.file).context("Error while reading the configuration file")?;
+        Config::from_file(args.config).context("Error while reading the configuration file")?;
 
     let context = config
         .to_client_context()
