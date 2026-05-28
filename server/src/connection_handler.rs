@@ -7,6 +7,7 @@ use rsa::RsaPrivateKey;
 use shared_library::server_protocol::{LoginError, Request, Response, SignInError, Timestamp};
 use std::fmt::{Display, Formatter};
 use std::io::ErrorKind;
+use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
@@ -22,7 +23,7 @@ use crate::database::{
     AddTokensError, AuthenticationError, GetTokensError, InternalDataBaseError, RegistrationError,
     ServerDataBase, SubtractTokensError,
 };
-use crate::server::{ServerSigner, SignError, Signer};
+use crate::server::{AcceleratedSigner, NoSignerYet, SignError, Signer, SlowSigner};
 use crate::time_oracle::TimeOracle;
 
 /// In order to access the state of the server by a lot of coroutines, we need to abstract it into
@@ -30,16 +31,40 @@ use crate::time_oracle::TimeOracle;
 /// Therefore, the server state must contain only cheap-to-clone variables, that can call the
 /// .clone() method without allocating heap memory.
 #[derive(Clone)]
-pub struct STSServerState {
+pub struct STSServerState<S: Signer> {
     database: ServerDataBase,
     cancel_token: CancellationToken,
     logged_users: Arc<DashSet<String>>,
     signing_key: Arc<RsaPrivateKey>,
     time_oracle: TimeOracle,
-    signer: ServerSigner,
+    signer: S,
 }
 
-impl STSServerState {
+impl<S> STSServerState<S>
+where
+    S: Signer,
+{
+    /// In the server, there's one specific instance where we only need to retrieve the cancellation
+    /// token. That is the run() function, in which we need the token in order to pass it to the
+    /// various coroutines. This function exists only for this reason: to not clone the entire
+    /// structure (which would be costless in any way, but whatever).
+    pub fn clone_cancel_token(&self) -> CancellationToken {
+        self.cancel_token.clone()
+    }
+}
+
+/// Builds the server state while being mindful of the signer.
+#[derive(Clone)]
+pub struct STSServerStateBuilder<S> {
+    database: ServerDataBase,
+    cancel_token: CancellationToken,
+    logged_users: Arc<DashSet<String>>,
+    signing_key: Arc<RsaPrivateKey>,
+    time_oracle: TimeOracle,
+    signer: PhantomData<S>,
+}
+
+impl STSServerStateBuilder<NoSignerYet> {
     /// Returns a STSServerState with all the required data, bundled into a single state.
     /// This method hides the complexity of dealing with Arcs and is useful only to conn_handler().
     pub fn from_bundle(
@@ -47,12 +72,11 @@ impl STSServerState {
         cancel_token: &CancellationToken,
         signing_key: RsaPrivateKey,
         time_oracle: TimeOracle,
-        signer: ServerSigner,
     ) -> Self {
         // It's also true that this violates the DIP, because someone might want to use another
         // type of smart pointer instead of Arc. In Rust, it's usually preferred to pass the
-        // argument indirectly and already wrapped into the smart pointer. But whatever, we only
-        // need this once.
+        // argument indirectly and already wrapped into the smart pointer. However, we need this
+        // method to hide to the caller the complexity of the state.
         Self {
             database,
             cancel_token: cancel_token.clone(),
@@ -61,16 +85,30 @@ impl STSServerState {
             logged_users: Arc::new(DashSet::new()),
             signing_key: Arc::new(signing_key),
             time_oracle,
-            signer,
+            signer: PhantomData,
         }
     }
 
-    /// In the server, there's one specific instance where we only need to retrieve the cancellation
-    /// token. That is the run() function, in which we need the token in order to pass it to the
-    /// interruption listener. This function exists only for this reason: to not clone the entire
-    /// structure (which would be costless in any way, but whatever).
-    pub fn clone_cancel_token(&self) -> CancellationToken {
-        self.cancel_token.clone()
+    pub fn get_accelerated_build(self) -> STSServerState<AcceleratedSigner> {
+        STSServerState {
+            database: self.database,
+            cancel_token: self.cancel_token,
+            logged_users: self.logged_users,
+            signing_key: self.signing_key,
+            time_oracle: self.time_oracle,
+            signer: AcceleratedSigner,
+        }
+    }
+
+    pub fn get_slow_build(self) -> STSServerState<SlowSigner> {
+        STSServerState {
+            database: self.database,
+            cancel_token: self.cancel_token,
+            logged_users: self.logged_users,
+            signing_key: self.signing_key,
+            time_oracle: self.time_oracle,
+            signer: SlowSigner,
+        }
     }
 }
 
@@ -242,11 +280,14 @@ where
 /// are, instead, very common (e.g. a client that types a wrong password, or tries to log in
 /// with a non-existent username, etc.). Those are handled alone by the function.
 #[inline(always)]
-pub async fn conn_handler(
+pub async fn conn_handler<S>(
     address: SocketAddr,
     stream: Framed<TlsStream<TcpStream>, LengthDelimitedCodec>,
-    state: &STSServerState,
-) -> Result<ClosedStreamReason, HandlerError> {
+    state: &STSServerState<S>,
+) -> Result<ClosedStreamReason, HandlerError>
+where
+    S: Signer + Send + Sync,
+{
     conn_handler_core(address, stream, state).await
 }
 
@@ -257,9 +298,9 @@ pub async fn conn_handler(
 /// principles, we believe that it adds points to security. That's because conn_handler() will only
 /// be callable with a ciphered stream (semantically secure) that wraps a TCP stream (type safety).
 #[inline(always)]
-async fn conn_handler_core<S>(
+async fn conn_handler_core<S, T>(
     address: SocketAddr,
-    mut stream: Framed<S, LengthDelimitedCodec>,
+    mut stream: Framed<T, LengthDelimitedCodec>,
     state @ STSServerState {
         database,
         cancel_token,
@@ -267,10 +308,11 @@ async fn conn_handler_core<S>(
         signing_key: _signing_key, // This function won't and doesn't have to use the signing key.
         time_oracle: _time_oracle, // Same.
         signer: _signer,           // Same.
-    }: &STSServerState,
+    }: &STSServerState<S>,
 ) -> Result<ClosedStreamReason, HandlerError>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    T: AsyncRead + AsyncWrite + Unpin,
+    S: Signer + Send + Sync,
 {
     loop {
         let request = match fetch_next_request(&mut stream, cancel_token, address).await? {
@@ -440,9 +482,9 @@ impl From<ClosedStreamReason> for ClosedSessionReason {
 /// Also, this function does not need the division between a generic "core" and a strict, public
 /// API. This is because this function does not have to be called from outside this module.
 #[inline(always)]
-async fn session_handler<S>(
+async fn session_handler<S, T>(
     session @ Session { address, username }: &Session,
-    stream: &mut Framed<S, LengthDelimitedCodec>,
+    stream: &mut Framed<T, LengthDelimitedCodec>,
     STSServerState {
         database,
         cancel_token,
@@ -450,10 +492,11 @@ async fn session_handler<S>(
         signing_key,
         time_oracle,
         signer,
-    }: &STSServerState,
+    }: &STSServerState<S>,
 ) -> Result<ClosedSessionReason, HandlerError>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    T: AsyncRead + AsyncWrite + Unpin,
+    S: Signer + Send + Sync,
 {
     loop {
         let request = match fetch_next_request(stream, cancel_token, *address).await? {
@@ -679,7 +722,7 @@ mod tests {
     async fn setup_test_env() -> (
         Framed<tokio::io::DuplexStream, LengthDelimitedCodec>,
         CancellationToken,
-        STSServerState,
+        STSServerState<AcceleratedSigner>,
     ) {
         let (client, server) = tokio::io::duplex(4096);
         let client_framed = Framed::new(client, LengthDelimitedCodec::new());
@@ -691,15 +734,10 @@ mod tests {
         // Generate a fast, small key for testing to avoid slowing down the test suite
         let signing_key = RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap();
         let time_oracle = TimeOracle::dummy();
-        let dummy_signer = ServerSigner::dummy();
 
-        let state = STSServerState::from_bundle(
-            database,
-            &cancel_token,
-            signing_key,
-            time_oracle,
-            dummy_signer,
-        );
+        let state =
+            STSServerStateBuilder::from_bundle(database, &cancel_token, signing_key, time_oracle)
+                .get_accelerated_build();
 
         let dummy_addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
         let state_clone = state.clone();
@@ -928,13 +966,13 @@ mod tests {
         let cancel_token = CancellationToken::new();
         let database = setup_memory_db().await;
 
-        let state = STSServerState::from_bundle(
+        let state = STSServerStateBuilder::from_bundle(
             database,
             &cancel_token,
             RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap(),
             TimeOracle::dummy(),
-            ServerSigner::dummy(),
-        );
+        )
+        .get_accelerated_build();
 
         let dummy_addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
 
@@ -988,13 +1026,13 @@ mod tests {
         let cancel_token = CancellationToken::new();
         let database = setup_memory_db().await;
 
-        let state = STSServerState::from_bundle(
+        let state = STSServerStateBuilder::from_bundle(
             database,
             &cancel_token,
             RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap(),
             TimeOracle::dummy(),
-            ServerSigner::dummy(),
-        );
+        )
+        .get_accelerated_build();
 
         // Register the "victim" directly into the shared DB
         state
@@ -1083,13 +1121,13 @@ mod tests {
         let cancel_token = CancellationToken::new();
         let database = setup_memory_db().await;
 
-        let state = STSServerState::from_bundle(
+        let state = STSServerStateBuilder::from_bundle(
             database,
             &cancel_token,
             RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap(),
             TimeOracle::dummy(),
-            ServerSigner::dummy(),
-        );
+        )
+        .get_slow_build();
 
         // Prepare the "poor_user" directly in the DB with EXACTLY 1 token
         state

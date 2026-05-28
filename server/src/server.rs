@@ -1,6 +1,6 @@
 //! Contains the main component for the server, with network and cryptography utilities.
 
-use crate::connection_handler::conn_handler;
+use crate::connection_handler::{conn_handler, STSServerStateBuilder};
 use crate::connection_handler::{HandlerError, NetworkError, ParsingError, STSServerState};
 use crate::database::{DataBaseBuildError, DataBaseLocation, ServerDataBaseBuilder};
 use crate::server::NetworkPort::{AnyFreePort, Port};
@@ -201,6 +201,7 @@ impl Signer for SlowSigner {
         let key_clone = Arc::clone(signing_key);
         let hash_copy = *hash_to_sign; // just copy it.
 
+        // In this case, we instruct the threadpool to take in charge of the calculation.
         let task_result = task::spawn_blocking(move || {
             generate_timestamp_signature_core(&key_clone, &hash_copy, timestamp)
         })
@@ -210,38 +211,8 @@ impl Signer for SlowSigner {
     }
 }
 
-/// "Generic" signer.
-#[derive(Clone)]
-pub enum ServerSigner {
-    Accelerated(AcceleratedSigner),
-    Slow(SlowSigner),
-}
-
-impl ServerSigner {
-    pub fn dummy() -> Self {
-        Self::Accelerated(AcceleratedSigner {})
-    }
-}
-
-impl Signer for ServerSigner {
-    async fn generate_timestamp_signature(
-        &self,
-        signing_key: &Arc<RsaPrivateKey>,
-        hash_to_sign: &[u8; 32],
-        timestamp: Timestamp,
-    ) -> Result<Vec<u8>, SignError> {
-        match self {
-            ServerSigner::Accelerated(s) => {
-                s.generate_timestamp_signature(signing_key, hash_to_sign, timestamp)
-                    .await
-            }
-            ServerSigner::Slow(s) => {
-                s.generate_timestamp_signature(signing_key, hash_to_sign, timestamp)
-                    .await
-            }
-        }
-    }
-}
+/// Only needed to keep the builder stateful.
+pub struct NoSignerYet;
 
 /// Errors that might arise while building the server.
 #[derive(Error, Debug)]
@@ -286,12 +257,30 @@ pub enum STSServerRunError {
     GenericAccept(String),
 }
 
+/// Public point of entry for the server.
+pub enum STSServer {
+    Accelerated(STSServerInstance<AcceleratedSigner>),
+    Slow(STSServerInstance<SlowSigner>),
+}
+
+impl From<STSServerInstance<AcceleratedSigner>> for STSServer {
+    fn from(value: STSServerInstance<AcceleratedSigner>) -> Self {
+        STSServer::Accelerated(value)
+    }
+}
+
+impl From<STSServerInstance<SlowSigner>> for STSServer {
+    fn from(value: STSServerInstance<SlowSigner>) -> Self {
+        STSServer::Slow(value)
+    }
+}
+
 /// Data needed by the server at runtime.
-pub struct STSServer {
+pub struct STSServerInstance<S: Signer> {
     address: SocketAddr,
     runtime: Runtime,
     tls_acceptor: TlsAcceptor,
-    state: STSServerState,
+    state: STSServerState<S>,
     time_oracle_worker: Option<TimeSyncWorker>,
     _log_guard: Option<WorkerGuard>,
 }
@@ -349,7 +338,7 @@ impl STSServer {
             info!(startup_msg);
         }
 
-        let mut rt = match working_threads {
+        let mut rt_builder = match working_threads {
             0 => return Err(STSServerBuildError::ZeroWorkingThreads),
             1 => tokio::runtime::Builder::new_current_thread(),
             n => {
@@ -359,25 +348,17 @@ impl STSServer {
             }
         };
 
-        let signer = if cryptography_threads > 0 {
-            rt.max_blocking_threads(cryptography_threads);
-            info!(
-                "Using a threadpool-based and slow signer of {} threads. This solution is better \
-                 if this system doesn't support hardware acceleration. If it is desired to use \
-                 the faster signer, please set the variable cryptography_threads in the \
-                 configuration file to be more than zero.",
-                cryptography_threads,
-            );
-            ServerSigner::Slow(SlowSigner)
-        } else {
-            debug!("Using an accelerated signer for cryptography operations.");
-            ServerSigner::Accelerated(AcceleratedSigner)
-        };
+        rt_builder.enable_all();
 
-        let rt = rt
-            .enable_all()
+        let use_hardware_acceleration = cryptography_threads > 0;
+
+        if use_hardware_acceleration {
+            rt_builder.max_blocking_threads(cryptography_threads);
+        }
+
+        let rt = rt_builder
             .build()
-            .expect("This runtime should work everytime, except breaking changes");
+            .expect("this should work everytime, except breaking changes");
 
         let config = ServerConfig::builder()
             .with_no_client_auth()
@@ -394,20 +375,58 @@ impl STSServer {
         let time_oracle_worker = Some(worker);
 
         let state =
-            STSServerState::from_bundle(database, &cancel_token, tss_priv, time_oracle, signer);
+            STSServerStateBuilder::from_bundle(database, &cancel_token, tss_priv, time_oracle);
 
         debug!("Server correctly built.");
 
-        Ok(Self {
-            runtime: rt,
-            address,
-            state,
-            tls_acceptor,
-            time_oracle_worker,
-            _log_guard,
-        })
+        if use_hardware_acceleration {
+            info!(
+                "Using a slow signer that uses a threadpool of {} threads. This solution is better \
+                 if this system doesn't support hardware acceleration. If it is desired to use \
+                 the faster signer, please set the variable cryptography_threads in the \
+                 configuration file to zero.",
+                cryptography_threads,
+            );
+
+            let build = STSServerInstance {
+                runtime: rt,
+                address,
+                state: state.get_slow_build(),
+                tls_acceptor,
+                time_oracle_worker,
+                _log_guard,
+            };
+
+            Ok(build.into())
+        } else {
+            debug!("Using an accelerated signer for cryptography operations.");
+
+            let build = STSServerInstance {
+                runtime: rt,
+                address,
+                state: state.get_accelerated_build(),
+                tls_acceptor,
+                time_oracle_worker,
+                _log_guard,
+            };
+
+            Ok(build.into())
+        }
     }
 
+    /// Public entry point to start the server in a blocking fashion.
+    pub fn run(self) -> Result<(), STSServerRunError> {
+        match self {
+            STSServer::Accelerated(server) => server.run(),
+            STSServer::Slow(server) => server.run(),
+        }
+    }
+}
+
+impl<S> STSServerInstance<S>
+where
+    S: Signer + Clone + Send + 'static + std::marker::Sync,
+{
     /// Wrapper around the more complex run_with_signal(). run_with_signal() is needed in order to
     /// test the server with different stopping signals than ctrl+c. This function calls it with
     /// only the only shutdown option ctrl+c, furthermore, it can be used in the future to update
@@ -465,6 +484,7 @@ impl STSServer {
         })
     }
 
+    /// Runs the TCP acceptor and handles the TLS handshake and the proper creation of each stream.
     async fn accept_loop(&self, cancel_token: CancellationToken) -> Result<(), STSServerRunError> {
         let listener = TcpListener::bind(self.address)
             .await
@@ -669,6 +689,19 @@ mod tests {
             // comment the line above and uncomment the line below:
             // let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         });
+    }
+
+    /// Let tests start the server with their custom signals.
+    impl STSServer {
+        fn run_with_signal<F>(self, shutdown_signal: F) -> Result<(), STSServerRunError>
+        where
+            F: Future<Output = ()> + Send + 'static,
+        {
+            match self {
+                STSServer::Accelerated(server) => server.run_with_signal(shutdown_signal),
+                STSServer::Slow(server) => server.run_with_signal(shutdown_signal),
+            }
+        }
     }
 
     impl ServerContext {
