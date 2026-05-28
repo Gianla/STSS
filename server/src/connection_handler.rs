@@ -21,7 +21,7 @@ use tracing::{error, info, warn};
 
 use crate::database::{
     AddTokensError, AuthenticationError, GetTokensError, InternalDataBaseError, RegistrationError,
-    ServerDataBase, SubtractTokensError,
+    ServerDataBase, SubtractTokensError, UserHistoryError,
 };
 use crate::server::{AcceleratedSigner, NoSignerYet, SignError, Signer, SlowSigner};
 use crate::time_oracle::TimeOracle;
@@ -249,19 +249,24 @@ where
         }
     };
 
-    let raw_message = result.map_err(|e| {
-        let framing_err = match e.kind() {
-            ErrorKind::InvalidData => {
-                FramingError::SizeSmashing(address, stream.codec().max_frame_length())
-            }
-            _ => FramingError::Generic(address, e.to_string()),
-        };
-        NetworkError::Framing {
-            address,
-            source: framing_err,
+    let raw_message = match result {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return match e.kind() {
+                ErrorKind::ConnectionReset | ErrorKind::BrokenPipe | ErrorKind::UnexpectedEof => {
+                    Err(NetworkError::ConnectionDropped)
+                }
+                ErrorKind::InvalidData => Err(NetworkError::Framing {
+                    address,
+                    source: FramingError::SizeSmashing(address, stream.codec().max_frame_length()),
+                }),
+                _ => Err(NetworkError::Framing {
+                    address,
+                    source: FramingError::Generic(address, e.to_string()),
+                }),
+            };
         }
-    })?;
-
+    };
     // The ? operator automatically converts ParsingError into NetworkError::Parsing
     let request = Request::deserialize(raw_message).map_err(ParsingError::from)?;
 
@@ -321,8 +326,10 @@ where
             Some(req) => req,
             None => {
                 let reason = if cancel_token.is_cancelled() {
+                    info!("{} disconnected after interrupt.", address);
                     ClosedStreamReason::InterruptReceived
                 } else {
+                    info!("{} disconnected.", address);
                     ClosedStreamReason::ClientAsked
                 };
                 break Ok(reason);
@@ -350,6 +357,10 @@ where
                             started_session = Some(Session::bundle(address, username));
                             Response::Ok
                         } else {
+                            info!(
+                                "{} attempted to login with username {:?} and password {:?}.",
+                                address, username, password
+                            );
                             Response::LoginFailed(LoginError::AlreadyLoggedIn)
                         }
                     }
@@ -381,11 +392,14 @@ where
 
             Request::SignUp(username, password) => {
                 let result = database
-                    .try_register_user(username, password, address.ip())
+                    .try_register_user(&username, password, address.ip())
                     .await;
 
                 match result {
-                    Ok(()) => Response::Ok,
+                    Ok(()) => {
+                        info!("New user registered: {}.", username);
+                        Response::Ok
+                    }
 
                     Err(RegistrationError::InternalDataBase(e)) => {
                         return Err(HandlerError::Domain {
@@ -394,7 +408,11 @@ where
                         });
                     }
 
-                    Err(RegistrationError::UserAlreadyExists(_user)) => {
+                    Err(RegistrationError::UserAlreadyExists(already_existing_username)) => {
+                        info!(
+                            "{} tried to sign in as {}, but the username was already taken.",
+                            address, already_existing_username
+                        );
                         Response::SignInFailed(SignInError::UsernameAlreadyTaken)
                     }
                 }
@@ -413,6 +431,8 @@ where
         };
 
         if let Some(session) = started_session {
+            info!("{} has logged in.", session);
+
             match session_handler(&session, &mut stream, state).await {
                 Err(error) => {
                     // Propagate the error, but make sure to unlock the username first.
@@ -427,7 +447,7 @@ where
                 }
 
                 Ok(ClosedSessionReason::ClosedStream(reason)) => {
-                    info!("User {} disconnected.", session);
+                    // Message is already logged inside of session_handler().
                     state.logged_users.remove(&session.username);
                     // Break the loop: the stream is dead or the server is shutting down.
                     return Ok(reason);
@@ -505,8 +525,10 @@ where
             Some(req) => req,
             None => {
                 let reason = if cancel_token.is_cancelled() {
+                    info!("{} disconnected after interrupt.", session);
                     ClosedStreamReason::InterruptReceived
                 } else {
+                    info!("{} disconnected.", session);
                     ClosedStreamReason::ClientAsked
                 };
                 break Ok(reason.into());
@@ -639,7 +661,13 @@ where
                     }
 
                     Err(token_add_error) => match token_add_error {
-                        AddTokensError::TokenOverflow => Response::TokenAmountTooHigh,
+                        AddTokensError::TokenOverflow => {
+                            info!(
+                                "{} tried to buy {} tokens but the amount is too high.",
+                                session, tokens
+                            );
+                            Response::TokenAmountTooHigh
+                        }
                         AddTokensError::UserDoesNotExist => {
                             return Err(HandlerError::Domain {
                                 username: Some(session.username.clone()),
@@ -686,7 +714,52 @@ where
                     });
                 }
             },
-            Request::History => todo!(),
+
+            Request::History => match database.get_user_history(username).await {
+                Ok(history) => {
+                    info!("{} requested their history.", session);
+                    Response::History(history)
+                }
+
+                Err(history_err) => match history_err {
+                    UserHistoryError::UserDoesNotExist => {
+                        return Err(HandlerError::Domain {
+                            username: Some(session.username.clone()),
+                            source: InternalError::UserNotFound,
+                        });
+                    }
+
+                    UserHistoryError::EmptyRecord => {
+                        info!("{} requested their history (it's empty).", session);
+                        Response::EmptyHistory
+                    }
+                    UserHistoryError::TimestampIntegrityViolated(token) => {
+                        return Err(HandlerError::Domain {
+                            username: Some(session.username.clone()),
+                            source: InternalError::IntegrityViolation(format!(
+                                "invalid timestamp of {}",
+                                token
+                            )),
+                        });
+                    }
+
+                    UserHistoryError::HashIntegrityViolated(hash) => {
+                        return Err(HandlerError::Domain {
+                            username: Some(session.username.clone()),
+                            source: InternalError::IntegrityViolation(format!(
+                                "invalid hash: {}",
+                                hash
+                            )),
+                        });
+                    }
+                    UserHistoryError::InternalDataBase(e) => {
+                        return Err(HandlerError::Domain {
+                            username: Some(session.username.clone()),
+                            source: InternalError::Database(e),
+                        });
+                    }
+                },
+            },
         };
 
         let serialized_response = response

@@ -87,6 +87,8 @@ pub enum Response {
     NotEnoughTokens,
     Token { sign: Vec<u8>, timestamp: Timestamp },
     OperationError(String),
+    History(Vec<HistoryRecord>),
+    EmptyHistory,
 }
 
 const MAX_ALLOCATION_SIZE: usize = 4 * 1024 * 1024;

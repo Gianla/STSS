@@ -4,9 +4,11 @@ use futures::sink::SinkExt;
 use rsa::RsaPublicKey;
 use rustls::pki_types::CertificateDer;
 use shared_library::server_protocol::{Request, Response, Timestamp};
+use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use thiserror::Error;
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
@@ -134,6 +136,11 @@ impl STSSClient {
             stream: framed_stream_stream,
             server_rsa_public_key: keys.server_rsa_public_key,
         })
+    }
+
+    pub async fn close(self) -> Result<(), io::Error> {
+        let mut tls_stream = self.stream.into_inner();
+        tls_stream.shutdown().await
     }
 
     #[inline(always)]

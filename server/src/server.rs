@@ -603,7 +603,7 @@ where
                         HandlerError::Network(network_err) => match network_err {
                             // Classical errors that might appear when a user misbehave in some way.
                             NetworkError::ConnectionDropped => {
-                                info!("{} disconnected.", new_address);
+                                info!("{} abruptly disconnected.", new_address);
                             }
 
                             NetworkError::ServerNetworkDown => {

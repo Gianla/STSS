@@ -34,14 +34,14 @@ async fn main() -> Result<(), anyhow::Error> {
 
     writeln!(
         &mut stdout,
-        "Connessione stabilita! Puoi inserire i comandi."
+        "Connection established! You can enter commands."
     )?;
-    writeln!(&mut stdout, "Comandi disponibili:")?;
+    writeln!(&mut stdout, "Available commands:")?;
     writeln!(&mut stdout, "  login <user> <pass>")?;
     writeln!(&mut stdout, "  signup <user> <pass>")?;
     writeln!(&mut stdout, "  tokens")?;
     writeln!(&mut stdout, "  buy <amount>")?;
-    writeln!(&mut stdout, "  hash <percorso_file>")?;
+    writeln!(&mut stdout, "  hash <file_path>")?;
     writeln!(&mut stdout, "  logout")?;
     writeln!(&mut stdout, "  exit")?;
     writeln!(&mut stdout, "-----------------------------------")?;
@@ -50,203 +50,206 @@ async fn main() -> Result<(), anyhow::Error> {
 
     for line_result in stdin.lines() {
         let line = line_result?;
-        let args: Vec<&str> = line.split_whitespace().collect();
 
-        if args.is_empty() {
-            continue;
-        }
+        // Create an iterator over the words in the line..
+        let mut parts = line.split_whitespace();
 
-        match args[0] {
+        // Safely extract the first word (the command).
+        let command = match parts.next() {
+            Some(cmd) => cmd,
+            None => continue, // Ignore empty lines or lines with only spaces.
+        };
+
+        match command {
             "exit" | "quit" => {
-                writeln!(&mut stdout, "Chiusura del client...")?;
+                writeln!(&mut stdout, "Closing the client...")?;
                 break;
             }
             "login" => {
-                if args.len() < 3 {
-                    writeln!(&mut stderr, "Uso: login <user> <pass>")?;
-                    continue;
-                }
-                match client.login(args[1], args[2]).await {
-                    Ok(Response::Ok) => {
-                        writeln!(&mut stdout, "[+] Login effettuato con successo!")?
+                // Try to extract user and password
+                if let (Some(user), Some(pass)) = (parts.next(), parts.next()) {
+                    match client.login(user, pass).await {
+                        Ok(Response::Ok) => writeln!(&mut stdout, "[+] Login successful!")?,
+                        Ok(Response::LoginFailed(e)) => {
+                            writeln!(&mut stderr, "[-] Login error: {}", e)?
+                        }
+                        Ok(Response::OperationError(msg)) => {
+                            writeln!(&mut stderr, "[-] Server operation error: {}", msg)?
+                        }
+                        Ok(unexpected) => writeln!(
+                            &mut stderr,
+                            "[!] Unexpected server response to login: {:?}",
+                            unexpected
+                        )?,
+                        Err(e) => writeln!(&mut stderr, "[!] Network/client error: {:?}", e)?,
                     }
-                    Ok(Response::LoginFailed(e)) => {
-                        writeln!(&mut stderr, "[-] Errore di login: {}", e)?
-                    }
-                    Ok(Response::OperationError(msg)) => {
-                        writeln!(&mut stderr, "[-] Errore operativo dal server: {}", msg)?
-                    }
-                    Ok(unexpected) => writeln!(
-                        &mut stderr,
-                        "[!] Risposta inaspettata dal server al login: {:?}",
-                        unexpected
-                    )?,
-                    Err(e) => writeln!(&mut stderr, "[!] Errore di rete/client: {:?}", e)?,
+                } else {
+                    writeln!(&mut stderr, "Usage: login <user> <pass>")?;
                 }
             }
             "signup" => {
-                if args.len() < 3 {
-                    writeln!(&mut stderr, "Uso: signup <user> <pass>")?;
-                    continue;
-                }
-                match client.signup(args[1], args[2]).await {
-                    Ok(Response::Ok) => writeln!(
-                        &mut stdout,
-                        "[+] Registrazione completata! (Ricorda che devi fare il login)"
-                    )?,
-                    Ok(Response::SignInFailed(e)) => {
-                        writeln!(&mut stderr, "[-] Errore di registrazione: {}", e)?
+                if let (Some(user), Some(pass)) = (parts.next(), parts.next()) {
+                    match client.signup(user, pass).await {
+                        Ok(Response::Ok) => writeln!(
+                            &mut stdout,
+                            "[+] Signup complete! (Remember you still need to log in)"
+                        )?,
+                        Ok(Response::SignInFailed(e)) => {
+                            writeln!(&mut stderr, "[-] Signup error: {}", e)?
+                        }
+                        Ok(Response::OperationError(msg)) => {
+                            writeln!(&mut stderr, "[-] Server operation error: {}", msg)?
+                        }
+                        Ok(unexpected) => writeln!(
+                            &mut stderr,
+                            "[!] Unexpected server response to signup: {:?}",
+                            unexpected
+                        )?,
+                        Err(e) => writeln!(&mut stderr, "[!] Network/client error: {:?}", e)?,
                     }
-                    Ok(Response::OperationError(msg)) => {
-                        writeln!(&mut stderr, "[-] Errore operativo dal server: {}", msg)?
-                    }
-                    Ok(unexpected) => writeln!(
-                        &mut stderr,
-                        "[!] Risposta inaspettata dal server al signup: {:?}",
-                        unexpected
-                    )?,
-                    Err(e) => writeln!(&mut stderr, "[!] Errore di rete/client: {:?}", e)?,
+                } else {
+                    writeln!(&mut stderr, "Usage: signup <user> <pass>")?;
                 }
             }
             "logout" => match client.logout().await {
-                Ok(Response::Ok) => writeln!(&mut stdout, "[+] Logout effettuato.")?,
+                Ok(Response::Ok) => writeln!(&mut stdout, "[+] Logout successful.")?,
                 Ok(Response::NotLoggedIn) => {
-                    writeln!(&mut stderr, "[-] Non sei attualmente loggato.")?
+                    writeln!(&mut stderr, "[-] You are not currently logged in.")?
                 }
                 Ok(Response::OperationError(msg)) => {
-                    writeln!(&mut stderr, "[-] Errore operativo dal server: {}", msg)?
+                    writeln!(&mut stderr, "[-] Server operation error: {}", msg)?
                 }
                 Ok(unexpected) => writeln!(
                     &mut stderr,
-                    "[!] Risposta inaspettata al logout: {:?}",
+                    "[!] Unexpected response to logout: {:?}",
                     unexpected
                 )?,
-                Err(e) => writeln!(&mut stderr, "[!] Errore di rete/client: {:?}", e)?,
+                Err(e) => writeln!(&mut stderr, "[!] Network/client error: {:?}", e)?,
             },
             "tokens" => match client.how_many_tokens().await {
                 Ok(Response::TokenCount(count)) => {
-                    writeln!(&mut stdout, "[+] Possiedi {} token.", count)?
+                    writeln!(&mut stdout, "[+] You own {} tokens.", count)?
                 }
                 Ok(Response::NotLoggedIn) => {
-                    writeln!(&mut stderr, "[-] Errore: devi prima fare il login.")?
+                    writeln!(&mut stderr, "[-] Error: you must log in first.")?
                 }
                 Ok(Response::OperationError(msg)) => {
-                    writeln!(&mut stderr, "[-] Errore operativo dal server: {}", msg)?
+                    writeln!(&mut stderr, "[-] Server operation error: {}", msg)?
                 }
                 Ok(unexpected) => writeln!(
                     &mut stderr,
-                    "[!] Risposta inaspettata alla richiesta token: {:?}",
+                    "[!] Unexpected response to token request: {:?}",
                     unexpected
                 )?,
-                Err(e) => writeln!(&mut stderr, "[!] Errore di rete/client: {:?}", e)?,
+                Err(e) => writeln!(&mut stderr, "[!] Network/client error: {:?}", e)?,
             },
             "buy" => {
-                if args.len() < 2 {
-                    writeln!(&mut stderr, "Uso: buy <quantità>")?;
-                    continue;
-                }
-                let amount: u64 = match args[1].parse() {
-                    Ok(n) => n,
-                    Err(_) => {
-                        writeln!(
-                            &mut stderr,
-                            "[-] La quantità deve essere un numero intero positivo."
-                        )?;
-                        continue;
-                    }
-                };
+                if let Some(amount_str) = parts.next() {
+                    let amount: u64 = match amount_str.parse() {
+                        Ok(n) => n,
+                        Err(_) => {
+                            writeln!(&mut stderr, "[-] The amount must be a positive integer.")?;
+                            continue;
+                        }
+                    };
 
-                match client.purchase_tokens(amount).await {
-                    Ok(Response::TokenCount(total)) => writeln!(
-                        &mut stdout,
-                        "[+] Acquisto completato! Ora hai {} token.",
-                        total
-                    )?,
-                    Ok(Response::TokenAmountTooHigh) => {
-                        writeln!(&mut stderr, "[-] Quantità troppo alta.")?
+                    match client.purchase_tokens(amount).await {
+                        Ok(Response::TokenCount(total)) => writeln!(
+                            &mut stdout,
+                            "[+] Purchase complete! You now have {} tokens.",
+                            total
+                        )?,
+                        Ok(Response::TokenAmountTooHigh) => {
+                            writeln!(&mut stderr, "[-] Amount too high.")?
+                        }
+                        Ok(Response::NotLoggedIn) => {
+                            writeln!(&mut stderr, "[-] Error: you must log in first.")?
+                        }
+                        Ok(Response::OperationError(msg)) => {
+                            writeln!(&mut stderr, "[-] Server operation error: {}", msg)?
+                        }
+                        Ok(unexpected) => writeln!(
+                            &mut stderr,
+                            "[!] Unexpected response to purchase: {:?}",
+                            unexpected
+                        )?,
+                        Err(e) => writeln!(&mut stderr, "[!] Network/client error: {:?}", e)?,
                     }
-                    Ok(Response::NotLoggedIn) => {
-                        writeln!(&mut stderr, "[-] Errore: devi prima fare il login.")?
-                    }
-                    Ok(Response::OperationError(msg)) => {
-                        writeln!(&mut stderr, "[-] Errore operativo dal server: {}", msg)?
-                    }
-                    Ok(unexpected) => writeln!(
-                        &mut stderr,
-                        "[!] Risposta inaspettata all'acquisto: {:?}",
-                        unexpected
-                    )?,
-                    Err(e) => writeln!(&mut stderr, "[!] Errore di rete/client: {:?}", e)?,
+                } else {
+                    writeln!(&mut stderr, "Usage: buy <amount>")?;
                 }
             }
             "hash" => {
-                if args.len() < 2 {
-                    writeln!(&mut stderr, "Uso: hash <percorso_file>")?;
-                    continue;
-                }
+                if let Some(path_str) = parts.next() {
+                    let file_path = PathBuf::from(path_str);
 
-                let file_path = PathBuf::from(args[1]);
-
-                writeln!(&mut stdout, "[*] Calcolo dell'hash del file in corso...")?;
-                let hash_result = match hash_file(file_path, None) {
-                    Ok(h) => h,
-                    Err(e) => {
-                        writeln!(
-                            &mut stderr,
-                            "[-] Errore durante la lettura del file: {:?}",
-                            e
-                        )?;
-                        continue;
-                    }
-                };
-
-                writeln!(&mut stdout, "[*] Richiesta della firma al server...")?;
-                match client.timestamp_hash(hash_result).await {
-                    Ok(Response::Token { sign, timestamp }) => {
-                        writeln!(
-                            &mut stdout,
-                            "[+] Hash firmato con successo! Timestamp: {}",
-                            timestamp.get()
-                        )?;
-
-                        match client.verify_timestamp_signature(&hash_result, timestamp, &sign) {
-                            Ok(_) => writeln!(
-                                &mut stdout,
-                                "[+] VERIFICA LOCALE SUPERATA: La firma è valida ed è stata prodotta dal server."
-                            )?,
-                            Err(e) => writeln!(
-                                &mut stderr,
-                                "[-] ATTENZIONE: La verifica locale della firma è fallita: {:?}",
-                                e
-                            )?,
+                    writeln!(&mut stdout, "[*] Calculating file hash...")?;
+                    let hash_result = match hash_file(file_path, None) {
+                        Ok(h) => h,
+                        Err(e) => {
+                            writeln!(&mut stderr, "[-] Error reading the file: {:?}", e)?;
+                            continue;
                         }
+                    };
+
+                    writeln!(&mut stdout, "[*] Requesting signature from the server...")?;
+                    match client.timestamp_hash(hash_result).await {
+                        Ok(Response::Token { sign, timestamp }) => {
+                            writeln!(
+                                &mut stdout,
+                                "[+] Hash signed successfully! Timestamp: {}",
+                                timestamp.get()
+                            )?;
+
+                            match client.verify_timestamp_signature(&hash_result, timestamp, &sign)
+                            {
+                                Ok(_) => writeln!(
+                                    &mut stdout,
+                                    "[+] LOCAL VERIFICATION PASSED: The signature is valid and was \
+                                     produced by the server."
+                                )?,
+                                Err(e) => writeln!(
+                                    &mut stderr,
+                                    "[-] WARNING: Local signature verification failed: {:?}",
+                                    e
+                                )?,
+                            }
+                        }
+                        Ok(Response::NotEnoughTokens) => writeln!(
+                            &mut stderr,
+                            "[-] Error: not enough tokens for this operation. Use the 'buy' \
+                             command to recharge."
+                        )?,
+                        Ok(Response::NotLoggedIn) => {
+                            writeln!(&mut stderr, "[-] Error: you must log in first.")?
+                        }
+                        Ok(Response::OperationError(msg)) => {
+                            writeln!(&mut stderr, "[-] Server operation error: {}", msg)?
+                        }
+                        Ok(unexpected) => writeln!(
+                            &mut stderr,
+                            "[!] Unexpected response to hash signature request: {:?}",
+                            unexpected
+                        )?,
+                        Err(e) => writeln!(&mut stderr, "[!] Network/client error: {:?}", e)?,
                     }
-                    Ok(Response::NotEnoughTokens) => writeln!(
-                        &mut stderr,
-                        "[-] Errore: non hai abbastanza token per questa operazione. Usare il comando 'buy' per ricaricare."
-                    )?,
-                    Ok(Response::NotLoggedIn) => {
-                        writeln!(&mut stderr, "[-] Errore: devi prima fare il login.")?
-                    }
-                    Ok(Response::OperationError(msg)) => {
-                        writeln!(&mut stderr, "[-] Errore operativo dal server: {}", msg)?
-                    }
-                    Ok(unexpected) => writeln!(
-                        &mut stderr,
-                        "[!] Risposta inaspettata alla richiesta di sign: {:?}",
-                        unexpected
-                    )?,
-                    Err(e) => writeln!(&mut stderr, "[!] Errore di rete/client: {:?}", e)?,
+                } else {
+                    writeln!(&mut stderr, "Usage: hash <file_path>")?;
                 }
             }
             _ => {
                 writeln!(
                     &mut stderr,
-                    "[-] Comando sconosciuto. Usa: login, signup, tokens, buy, hash, logout, exit."
+                    "[-] Unknown command. Usage: login, signup, tokens, buy, hash, logout, exit."
                 )?;
             }
         }
     }
+
+    match client.close().await {
+        Ok(_) => writeln!(&mut stdout, "[+] Client closed successfully.")?,
+        Err(e) => writeln!(&mut stderr, "[!] Error while closing the client: {:?}", e)?,
+    };
 
     Ok(())
 }
