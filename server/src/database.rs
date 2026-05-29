@@ -932,9 +932,7 @@ mod tests {
 
         let result = db.get_user_history(username).await;
 
-        result.expect("fail");
-
-        // assert!(result.is_ok(), "function should succeed");
+        assert!(result.is_ok(), "function should succeed");
     }
 
     #[tokio::test]
