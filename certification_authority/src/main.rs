@@ -12,11 +12,10 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
-#[command(name = "STSS certification authority")]
+#[command(name = "STSS Certification Authority")]
 #[command(version = "0.1.0")]
-#[command(about = "Minimal Certification Authority Skeleton for STSS")]
-struct Cli{
-    
+#[command(about = "Minimal Certification Authority skeleton for STSS.")]
+struct Cli {
     /// Path to the CA TOML configuration file.
     #[arg(short, long, value_name = "FILE")]
     config: PathBuf,
@@ -25,8 +24,8 @@ struct Cli{
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-       .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse()?))
-       .init();
+        .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse()?))
+        .init();
 
     let cli = Cli::parse();
 
@@ -44,6 +43,6 @@ async fn main() -> Result<()> {
 
     SmallServer::build(context)
         .run()
-        .await()
+        .await
         .context("Certification Authority stopped with an error")
 }
