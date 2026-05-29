@@ -34,8 +34,8 @@ async fn main() -> Result<()> {
         "starting STSS Certification Authority"
     );
 
-    let config = Config::from_file(cli.config)
-        .context("failed to read the CA configuration file")?;
+    let config =
+        Config::from_file(cli.config).context("failed to read the CA configuration file")?;
 
     let context = config
         .to_context()

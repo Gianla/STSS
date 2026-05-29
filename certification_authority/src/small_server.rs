@@ -1,4 +1,3 @@
-
 use crate::config::CaContext;
 use futures_util::{SinkExt, StreamExt};
 use shared_library::ca_protocol::{Request, Response};
@@ -107,10 +106,7 @@ impl SmallServer {
     }
 }
 
-async fn handle_client(
-    stream: TcpStream,
-    context: CaContext,
-) -> Result<(), ClientHandlingError> {
+async fn handle_client(stream: TcpStream, context: CaContext) -> Result<(), ClientHandlingError> {
     let codec = LengthDelimitedCodec::builder()
         .max_frame_length(MAX_CA_FRAME_LENGTH)
         .new_codec();

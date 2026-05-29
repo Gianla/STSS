@@ -1,16 +1,15 @@
 //! Contains the main component for the server, with network and cryptography utilities.
 
 use crate::connection_handler::{conn_handler, STSServerStateBuilder};
-use crate::connection_handler::{HandlerError, NetworkError, ParsingError, STSServerState};
+use crate::connection_handler::{HandlerError, NetworkError, STSServerState};
 use crate::database::{DataBaseBuildError, DataBaseLocation, ServerDataBaseBuilder};
 use crate::server::NetworkPort::{AnyFreePort, Port};
 use crate::time_oracle::{TimeOracleBundle, TimeSyncWorker};
 
-use rsa::sha2::{Digest, Sha256};
-use rsa::{Pkcs1v15Sign, RsaPrivateKey};
+use rsa::RsaPrivateKey;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::ServerConfig;
-use shared_library::server_protocol::Timestamp;
+use shared_library::server_protocol::{sign_with_timestamp, RsaSignature, Sha256Hash, Timestamp};
 use std::future::Future;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
@@ -141,29 +140,9 @@ pub trait Signer {
     fn generate_timestamp_signature(
         &self,
         signing_key: &Arc<RsaPrivateKey>,
-        hash_to_sign: &[u8; 32],
+        hash_to_sign: Sha256Hash,
         timestamp: Timestamp,
-    ) -> impl Future<Output = Result<Vec<u8>, SignError>> + Send;
-}
-
-/// Main function used to sign a hash.
-#[inline(always)]
-fn generate_timestamp_signature_core(
-    signing_key: &Arc<RsaPrivateKey>,
-    hash_to_sign: &[u8; 32],
-    timestamp: Timestamp,
-) -> Result<Vec<u8>, SignError> {
-    let mut hasher = Sha256::new();
-
-    hasher.update(hash_to_sign);
-    hasher.update(timestamp.get().to_be_bytes());
-
-    let combined_hash: [u8; 32] = hasher.finalize().into();
-    let padding = Pkcs1v15Sign::new::<Sha256>();
-
-    signing_key
-        .sign(padding, &combined_hash)
-        .map_err(SignError::Crypto)
+    ) -> impl Future<Output = Result<RsaSignature, SignError>> + Send;
 }
 
 /// The Accelerated Signer is used when the cryptography threads are zero, because the system
@@ -177,10 +156,12 @@ impl Signer for AcceleratedSigner {
     async fn generate_timestamp_signature(
         &self,
         signing_key: &Arc<RsaPrivateKey>,
-        hash_to_sign: &[u8; 32],
+        hash_to_sign: Sha256Hash,
         timestamp: Timestamp,
-    ) -> Result<Vec<u8>, SignError> {
-        generate_timestamp_signature_core(signing_key, hash_to_sign, timestamp)
+    ) -> Result<RsaSignature, SignError> {
+        let hash_copy = hash_to_sign;
+
+        sign_with_timestamp(signing_key, hash_copy, timestamp).map_err(SignError::Crypto)
     }
 }
 
@@ -195,19 +176,19 @@ impl Signer for SlowSigner {
     async fn generate_timestamp_signature(
         &self,
         signing_key: &Arc<RsaPrivateKey>,
-        hash_to_sign: &[u8; 32],
+        hash_to_sign: Sha256Hash,
         timestamp: Timestamp,
-    ) -> Result<Vec<u8>, SignError> {
+    ) -> Result<RsaSignature, SignError> {
         let key_clone = Arc::clone(signing_key);
-        let hash_copy = *hash_to_sign; // just copy it.
+        let hash_copy = hash_to_sign; // just copy it.
 
         // In this case, we instruct the threadpool to take in charge of the calculation.
-        let task_result = task::spawn_blocking(move || {
-            generate_timestamp_signature_core(&key_clone, &hash_copy, timestamp)
-        })
-        .await;
+        let task_result =
+            task::spawn_blocking(move || sign_with_timestamp(&key_clone, hash_copy, timestamp))
+                .await
+                .map_err(SignError::ThreadPanic)?;
 
-        task_result.map_err(SignError::ThreadPanic)?
+        task_result.map_err(SignError::Crypto)
     }
 }
 
@@ -623,28 +604,15 @@ where
                                 );
                             }
 
-                            NetworkError::Parsing(parsing_err) => match parsing_err {
-                                ParsingError::Serialize(error) => {
-                                    error!(
-                                        "Error while serializing a response to send to a \
-                                         client: {}. Likely, this will happen for all this \
-                                         kind of responses, for all sessions. This \
-                                         connection has been closed, but expect others to \
-                                         do so too.",
-                                        error,
-                                    )
-                                }
-
-                                ParsingError::Deserialize(error) => {
-                                    warn!(
-                                        "Protocol parsing/serialization error with {}: {}. \
-                                         The client might not be respecting the protocol \
-                                         or sent an unrecognized pattern. Connection \
-                                         closed.",
-                                        new_address, error
-                                    );
-                                }
-                            },
+                            NetworkError::Deserialize(deserialize_err) => {
+                                warn!(
+                                    "Protocol parsing/serialization error with {}: {}. \
+                                     The client might not be respecting the protocol \
+                                     or sent an unrecognized pattern. Connection \
+                                     closed.",
+                                    new_address, deserialize_err
+                                );
+                            }
 
                             NetworkError::Generic(io_err) => {
                                 error!(
@@ -680,6 +648,7 @@ mod tests {
     use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
     use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
     use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
+    use shared_library::server_protocol::RSA_KEY_SIZE_IN_BITS;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -737,7 +706,7 @@ mod tests {
                 .expect("Failed to parse the private key DER into rustls PrivateKeyDer");
 
             let mut rng = rand::thread_rng();
-            let tss_priv = rsa::RsaPrivateKey::new(&mut rng, 2048)
+            let tss_priv = rsa::RsaPrivateKey::new(&mut rng, RSA_KEY_SIZE_IN_BITS)
                 .expect("Failed to generate RSA private key in tests");
 
             let key_context = KeyContext::new(tls_cert, tls_priv, tss_priv);

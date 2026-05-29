@@ -2,7 +2,7 @@ use crate::client::STSSClient;
 use rsa::Pkcs1v15Sign;
 use sha2::{Digest, Sha256};
 use shared_library::safe_read::{SafeFileReader, SafeReadError};
-use shared_library::server_protocol::Timestamp;
+use shared_library::server_protocol::{RsaSignature, Sha256Hash, Timestamp};
 use std::path::PathBuf;
 use thiserror::Error;
 
@@ -15,7 +15,7 @@ pub enum HashError {
 pub fn hash_file(
     raw_path: impl Into<PathBuf>,
     expected_extension: Option<&str>,
-) -> Result<[u8; 32], SafeReadError> {
+) -> Result<Sha256Hash, SafeReadError> {
     let mut reader = SafeFileReader::new(raw_path, expected_extension)?;
 
     let mut hasher = Sha256::new();
@@ -24,9 +24,9 @@ pub fn hash_file(
         hasher.update(chunk_result?);
     }
 
-    let hash_result = hasher.finalize();
+    let hash_result = Sha256Hash::from(hasher.finalize().as_ref());
 
-    Ok(hash_result.into())
+    Ok(hash_result)
 }
 
 #[derive(Debug, Error)]
@@ -40,9 +40,9 @@ impl STSSClient {
     #[inline(always)]
     pub fn verify_timestamp_signature(
         &self,
-        hash_to_verify: &[u8; 32],
+        hash_to_verify: Sha256Hash,
         timestamp: Timestamp,
-        signature: &[u8],
+        signature: RsaSignature,
     ) -> Result<(), VerifyError> {
         let mut hasher = Sha256::new();
 
@@ -54,7 +54,7 @@ impl STSSClient {
         let padding = Pkcs1v15Sign::new::<Sha256>();
 
         self.server_rsa_public_key()
-            .verify(padding, &combined_hash, signature)
+            .verify(padding, &combined_hash, signature.as_ref())
             .map_err(VerifyError::Crypto)
     }
 }

@@ -8,7 +8,7 @@ use argon2::{
     Argon2, PasswordHasher,
 };
 use futures::{StreamExt, TryStreamExt};
-use shared_library::server_protocol::{HistoryRecord, Timestamp};
+use shared_library::server_protocol::{HistoryRecord, RsaSignature, Timestamp};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{FromRow, Row, SqlitePool};
 use std::net::IpAddr;
@@ -19,6 +19,15 @@ use thiserror::Error;
 pub enum DataBaseLocation {
     Disk(PathBuf),
     Memory,
+}
+
+/// Inside the database, we used SQL. When a query uses a ORDER clause, it performs a comparison
+/// with memcmp under the hood. This comparison works only with big endian numbers, little endian
+/// would mess it up. Therefore, we wrap the obtaining of a resource in a database-supported form
+/// into a big endian call.
+#[inline(always)]
+fn timestamp_as_sql_database_format(ts: Timestamp) -> [u8; 16] {
+    ts.as_be_bytes()
 }
 
 /// Possible errors that might arise while performing database operations.
@@ -106,14 +115,21 @@ pub enum UserHistoryError {
     #[error("user does not exist")]
     UserDoesNotExist,
 
-    #[error("record is empty")]
-    EmptyRecord,
-
     #[error("the specified user has an hash with invalid timestamp: {0}")]
-    TimestampIntegrityViolated(i64),
+    TimestampIntegrityViolated(String),
 
     #[error("the specified user has an invalid hash: {0:?}")]
     HashIntegrityViolated(String),
+
+    #[error(transparent)]
+    InternalDataBase(#[from] InternalDataBaseError),
+}
+
+/// Errors that may arise when getting the user's history.
+#[derive(Error, Debug)]
+pub enum AddRecordError {
+    #[error("user does not exist")]
+    UserDoesNotExist,
 
     #[error(transparent)]
     InternalDataBase(#[from] InternalDataBaseError),
@@ -137,6 +153,13 @@ impl From<sqlx::Error> for SubtractTokensError {
 impl From<sqlx::Error> for UserHistoryError {
     fn from(err: sqlx::Error) -> Self {
         UserHistoryError::InternalDataBase(InternalDataBaseError::Sql(err))
+    }
+}
+
+/// To directly convert a UserHistoryError into an InternalDataBaseError.
+impl From<sqlx::Error> for AddRecordError {
+    fn from(err: sqlx::Error) -> Self {
+        AddRecordError::InternalDataBase(InternalDataBaseError::Sql(err))
     }
 }
 
@@ -333,6 +356,45 @@ impl ServerDataBase {
         Ok(resulting_tokens as u64)
     }
 
+    pub async fn add_user_record(
+        &self,
+        username: &str,
+        timestamp: Timestamp,
+        sign: &RsaSignature,
+    ) -> Result<(), AddRecordError> {
+        let mut tx = self.connection_pool.begin().await?;
+
+        let user_exists: Option<i32> = sqlx::query_scalar("SELECT 1 FROM users WHERE username = ?")
+            .bind(username)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(InternalDataBaseError::from)?;
+
+        if user_exists.is_none() {
+            return Err(AddRecordError::UserDoesNotExist);
+        }
+
+        let ts_bytes = timestamp_as_sql_database_format(timestamp);
+        let sign_bytes = sign.as_bytes();
+
+        sqlx::query(
+            r#"
+            INSERT INTO history (username, timestamp, hash)
+            VALUES (?, ?, ?)
+            "#,
+        )
+        .bind(username)
+        .bind(ts_bytes.as_slice())
+        .bind(sign_bytes.as_slice())
+        .execute(&mut *tx)
+        .await
+        .map_err(InternalDataBaseError::from)?;
+
+        tx.commit().await.map_err(InternalDataBaseError::from)?;
+
+        Ok(())
+    }
+
     pub async fn get_user_history(
         &self,
         username: &str,
@@ -366,21 +428,21 @@ impl ServerDataBase {
         while let Some(row_result) = stream.next().await {
             let row = row_result?;
 
-            let raw_timestamp: i64 = row.get("timestamp");
-            let timestamp = Timestamp::try_from(raw_timestamp)
-                .map_err(|_| UserHistoryError::TimestampIntegrityViolated(raw_timestamp))?;
+            let raw_ts_bytes: &[u8] = row.get("timestamp");
+
+            let ts_array: [u8; 16] = raw_ts_bytes.try_into().map_err(|_| {
+                UserHistoryError::TimestampIntegrityViolated(hex::encode(raw_ts_bytes))
+            })?;
+
+            let timestamp = Timestamp::from_be(ts_array);
 
             let hash_slice: &[u8] = row.get("hash");
 
-            let hash_bytes: [u8; 32] = hash_slice
+            let hash_bytes: RsaSignature = hash_slice
                 .try_into()
                 .map_err(|_| UserHistoryError::HashIntegrityViolated(hex::encode(hash_slice)))?;
 
             records.push(HistoryRecord::new(hash_bytes, timestamp));
-        }
-
-        if records.is_empty() {
-            return Err(UserHistoryError::EmptyRecord);
         }
 
         Ok(records)
@@ -480,7 +542,7 @@ impl ServerDataBaseBuilder {
 
             CREATE TABLE IF NOT EXISTS history (
                 username TEXT NOT NULL,
-                timestamp INTEGER NOT NULL,
+                timestamp BLOB NOT NULL,
                 hash BLOB NOT NULL,
 
                 PRIMARY KEY (username, timestamp),
@@ -562,6 +624,7 @@ impl ServerDataBaseBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shared_library::server_protocol::RSA_KEY_SIZE_IN_BYTES;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use std::net::Ipv6Addr;
     use std::str::FromStr;
@@ -830,7 +893,11 @@ mod tests {
 
         let result = db.get_user_history(username).await;
 
-        assert!(matches!(result, Err(UserHistoryError::EmptyRecord)));
+        assert!(result.is_ok());
+
+        let vec = result.unwrap();
+
+        assert!(vec.is_empty());
     }
 
     #[tokio::test]
@@ -839,20 +906,25 @@ mod tests {
         let username = "bob";
 
         // Insert user.
-        sqlx::query("INSERT INTO users (username, password_hash, available_tokens, registered_from_ip) VALUES (?, 'dummy', 10, '127.0.0.1')")
-            .bind(username)
-            .execute(&db.connection_pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            r#"
+            INSERT INTO users (username, password_hash, available_tokens, registered_from_ip)
+            VALUES (?, 'dummy', 10, '127.0.0.1')
+        "#,
+        )
+        .bind(username)
+        .execute(&db.connection_pool)
+        .await
+        .unwrap();
 
         // Prepare a valid hash.
-        let valid_hash = [1u8; 32];
-        let timestamp = 1680000000i64;
+        let valid_hash = [1u8; RSA_KEY_SIZE_IN_BYTES];
+        let timestamp = 1680000000_u128.to_be_bytes();
 
         // Insert it into history.
         sqlx::query("INSERT INTO history (username, timestamp, hash) VALUES (?, ?, ?)")
             .bind(username)
-            .bind(timestamp)
+            .bind(timestamp.as_slice())
             .bind(valid_hash.as_slice())
             .execute(&db.connection_pool)
             .await
@@ -860,7 +932,9 @@ mod tests {
 
         let result = db.get_user_history(username).await;
 
-        assert!(result.is_ok(), "function should succeed");
+        result.expect("fail");
+
+        // assert!(result.is_ok(), "function should succeed");
     }
 
     #[tokio::test]
@@ -868,18 +942,23 @@ mod tests {
         let db = setup_memory_db().await;
         let username = "charlie";
 
-        sqlx::query("INSERT INTO users (username, password_hash, available_tokens, registered_from_ip) VALUES (?, 'dummy', 10, '127.0.0.1')")
-            .bind(username)
-            .execute(&db.connection_pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            r#"
+            INSERT INTO users (username, password_hash, available_tokens, registered_from_ip)
+            VALUES (?, 'dummy', 10, '127.0.0.1')
+        "#,
+        )
+        .bind(username)
+        .execute(&db.connection_pool)
+        .await
+        .unwrap();
 
         // Prepare an invalid hash.
         let invalid_hash = [2u8; 10];
 
         sqlx::query("INSERT INTO history (username, timestamp, hash) VALUES (?, ?, ?)")
             .bind(username)
-            .bind(1680000000i64)
+            .bind(1680000000_u128.to_be_bytes().as_slice())
             .bind(invalid_hash.as_slice())
             .execute(&db.connection_pool)
             .await
@@ -891,5 +970,217 @@ mod tests {
             result,
             Err(UserHistoryError::HashIntegrityViolated(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn test_add_record_success() {
+        let db = setup_memory_db().await;
+        let user = "alice_history";
+        let ip = IpAddr::from_str("127.0.0.1").unwrap();
+
+        db.try_register_user(user, "pass", ip).await.unwrap();
+
+        // Create a mock timestamp and a 256-byte RSA signature.
+        let timestamp = Timestamp::from(1680000000_u128.to_be_bytes());
+        let signature = RsaSignature::from([42u8; 256]);
+
+        let result = db.add_user_record(user, timestamp, &signature).await;
+        assert!(result.is_ok(), "Adding a valid record should succeed");
+
+        // Verify that the record was correctly stored and can be retrieved.
+        let history = db.get_user_history(user).await.unwrap();
+        assert_eq!(history.len(), 1, "History should contain exactly 1 record");
+    }
+
+    #[tokio::test]
+    async fn test_add_record_user_does_not_exist() {
+        let db = setup_memory_db().await;
+        let timestamp = Timestamp::from(100_u128.to_be_bytes());
+        let signature = RsaSignature::from([42u8; 256]);
+
+        let err = db
+            .add_user_record("ghost_user", timestamp, &signature)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, AddRecordError::UserDoesNotExist),
+            "Expected UserDoesNotExist when adding a record for a missing user"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_add_record_duplicate_pk_constraint() {
+        let db = setup_memory_db().await;
+        let user = "bob_history";
+        db.try_register_user(user, "pass", IpAddr::from_str("127.0.0.1").unwrap())
+            .await
+            .unwrap();
+
+        let timestamp = Timestamp::from(1000_u128.to_be_bytes());
+        let signature = RsaSignature::from([42u8; 256]);
+
+        // First insert should succeed.
+        db.add_user_record(user, timestamp, &signature)
+            .await
+            .unwrap();
+
+        // Second insert with the exact SAME timestamp should trigger a Primary Key violation
+        // because the PK is (username, timestamp).
+        let err = db
+            .add_user_record(user, timestamp, &signature)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(
+                err,
+                AddRecordError::InternalDataBase(InternalDataBaseError::Sql(
+                    sqlx::Error::Database(_)
+                ))
+            ),
+            "Expected a database constraint error due to duplicate Primary Key"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_permissiveness_timestamp_corruption() {
+        let db = setup_memory_db().await;
+        let user = "charlie_corrupt";
+        db.try_register_user(user, "pass", IpAddr::from_str("127.0.0.1").unwrap())
+            .await
+            .unwrap();
+
+        // We bypass the safe Rust API and manually inject a plain TEXT string
+        // into the BLOB column. SQLite allows this dynamically!
+        sqlx::query("INSERT INTO history (username, timestamp, hash) VALUES (?, ?, ?)")
+            .bind(user)
+            .bind("this_is_a_text_not_a_16_byte_blob") // Wrong type and size!
+            .bind([1u8; 256].as_slice())
+            .execute(&db.connection_pool)
+            .await
+            .unwrap();
+
+        // Now we test our robust Rust extraction logic. It should catch the bad length.
+        let err = db.get_user_history(user).await.unwrap_err();
+
+        assert!(
+            matches!(err, UserHistoryError::TimestampIntegrityViolated(_)),
+            "The Rust code must intercept the corrupt BLOB size and reject it"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_permissiveness_float_tokens() {
+        let db = setup_memory_db().await;
+        let user = "dave_float";
+        db.try_register_user(user, "pass", IpAddr::from_str("127.0.0.1").unwrap())
+            .await
+            .unwrap();
+
+        // We manually inject a FLOAT (REAL) into the INTEGER column.
+        // SQLite will store it as REAL if it can't be converted losslessly (like 50.5).
+        sqlx::query("UPDATE users SET available_tokens = 50.5 WHERE username = ?")
+            .bind(user)
+            .execute(&db.connection_pool)
+            .await
+            .unwrap();
+
+        // sqlx strictly expects an i64 integer here. It will panic/error out
+        // protecting our application from floating-point inaccuracies.
+        let err = db.get_user_tokens(user).await.unwrap_err();
+
+        assert!(
+            matches!(
+                err,
+                GetTokensError::InternalDataBase(InternalDataBaseError::Sql(
+                    sqlx::Error::ColumnDecode { .. }
+                ))
+            ),
+            "sqlx should refuse to decode a SQLite REAL into a Rust i64"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tokens_addition_overflow() {
+        let db = setup_memory_db().await;
+        let user = "eve_overflow";
+        db.try_register_user(user, "pass", IpAddr::from_str("127.0.0.1").unwrap())
+            .await
+            .unwrap();
+
+        // Manually set tokens to a critically high number, extremely close to i64::MAX.
+        sqlx::query("UPDATE users SET available_tokens = ? WHERE username = ?")
+            .bind(i64::MAX - 10)
+            .bind(user)
+            .execute(&db.connection_pool)
+            .await
+            .unwrap();
+
+        // Try to add an amount that exceeds i64::MAX.
+        // Our Rust `checked_add` inside `add_user_tokens` should safely catch it.
+        let err = db.add_user_tokens(user, 50).await.unwrap_err();
+
+        assert!(
+            matches!(err, AddTokensError::TokenOverflow),
+            "Expected TokenOverflow error preventing integer wrapping"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_history_ordering_by_timestamp() {
+        let db = setup_memory_db().await;
+        let user = "chronos";
+
+        db.try_register_user(user, "pass", IpAddr::from_str("127.0.0.1").unwrap())
+            .await
+            .unwrap();
+
+        // We create three distinct timestamps.
+        // Using u128 to represent different points in time.
+        let time_old = Timestamp::from(1600000000_u128.to_be_bytes());
+        let time_mid = Timestamp::from(1650000000_u128.to_be_bytes());
+        let time_new = Timestamp::from(1700000000_u128.to_be_bytes());
+
+        // A dummy signature using your constant
+        let signature = RsaSignature::from([42u8; RSA_KEY_SIZE_IN_BYTES]);
+
+        // IMPORTANT: We insert them OUT OF ORDER deliberately.
+        // This ensures that the sorting is done by the SQL query (ORDER BY)
+        // and not just by the chronological insertion order.
+        db.add_user_record(user, time_mid, &signature)
+            .await
+            .unwrap();
+        db.add_user_record(user, time_new, &signature)
+            .await
+            .unwrap();
+        db.add_user_record(user, time_old, &signature)
+            .await
+            .unwrap();
+
+        // Retrieve the history
+        let history = db
+            .get_user_history(user)
+            .await
+            .expect("Failed to get history");
+
+        // Verify we got all 3 records
+        assert_eq!(history.len(), 3, "Should retrieve exactly 3 records");
+
+        assert_eq!(
+            history[0].timestamp(),
+            time_new,
+            "First record should be the NEWEST timestamp"
+        );
+        assert_eq!(
+            history[1].timestamp(),
+            time_mid,
+            "Second record should be the MIDDLE timestamp"
+        );
+        assert_eq!(
+            history[2].timestamp(),
+            time_old,
+            "Third record should be the OLDEST timestamp"
+        );
     }
 }

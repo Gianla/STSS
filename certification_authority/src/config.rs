@@ -1,4 +1,3 @@
-
 use serde::{Deserialize, Serialize};
 use shared_library::safe_read::{safe_read, SafeReadError};
 use std::net::{IpAddr, SocketAddr};
@@ -63,8 +62,7 @@ impl Config {
         let raw_toml = String::from_utf8(safe_read(path, TOML_EXT)?)
             .map_err(|e| ConfigError::TomlNotUtf8(e.to_string()))?;
 
-        toml::from_str(&raw_toml)
-            .map_err(|e| ConfigError::Parse(e.to_string()))
+        toml::from_str(&raw_toml).map_err(|e| ConfigError::Parse(e.to_string()))
     }
 
     pub fn to_context(self) -> Result<CaContext, ContextConversionError> {
@@ -74,8 +72,7 @@ impl Config {
             .parse::<IpAddr>()
             .map_err(|e| ContextConversionError::InvalidIp(e.to_string()))?;
 
-        let port = NonZeroU16::new(self.network.port)
-            .ok_or(ContextConversionError::InvalidPort)?;
+        let port = NonZeroU16::new(self.network.port).ok_or(ContextConversionError::InvalidPort)?;
 
         let address = SocketAddr::new(ip, port.get());
 

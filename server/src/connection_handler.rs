@@ -4,7 +4,9 @@
 use dashmap::DashSet;
 use futures::{SinkExt, StreamExt};
 use rsa::RsaPrivateKey;
-use shared_library::server_protocol::{LoginError, Request, Response, SignInError, Timestamp};
+use shared_library::server_protocol::{
+    DeserializeError, LoginError, Request, Response, SerializeError, SignInError, Timestamp,
+};
 use std::fmt::{Display, Formatter};
 use std::io::ErrorKind;
 use std::marker::PhantomData;
@@ -20,8 +22,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::database::{
-    AddTokensError, AuthenticationError, GetTokensError, InternalDataBaseError, RegistrationError,
-    ServerDataBase, SubtractTokensError, UserHistoryError,
+    AddRecordError, AddTokensError, AuthenticationError, GetTokensError, InternalDataBaseError,
+    RegistrationError, ServerDataBase, SubtractTokensError, UserHistoryError,
 };
 use crate::server::{AcceleratedSigner, NoSignerYet, SignError, Signer, SlowSigner};
 use crate::time_oracle::TimeOracle;
@@ -133,16 +135,6 @@ pub enum FramingError {
     Generic(SocketAddr, String),
 }
 
-/// Possible errors that might arise when using wincode to parse a message.
-#[derive(Error, Debug)]
-pub enum ParsingError {
-    #[error("wincode write error: {0}")]
-    Serialize(#[from] wincode::WriteError),
-
-    #[error("wincode write error: {0}")]
-    Deserialize(#[from] wincode::ReadError),
-}
-
 /// Errors that indicate a physical or structural failure in the network connection.
 /// These errors are fatal for the specific socket and must break the connection loop.
 #[derive(Error, Debug)]
@@ -163,8 +155,8 @@ pub enum NetworkError {
         source: FramingError,
     },
 
-    #[error("wincode parsing error: {0}")]
-    Parsing(#[from] ParsingError),
+    #[error(transparent)]
+    Deserialize(#[from] DeserializeError),
 }
 
 /// Errors related to the business logic and application state.
@@ -174,13 +166,16 @@ pub enum InternalError {
     Database(#[from] InternalDataBaseError),
 
     #[error("user does not exist or was deleted during session")]
-    UserNotFound,
+    UserShouldExistButWasNotFound,
 
     #[error("system clock is out of sync")]
     ClockStaggered,
 
     #[error("data integrity violation: {0}")]
     IntegrityViolation(String),
+
+    #[error(transparent)]
+    Serialize(#[from] SerializeError),
 }
 
 /// The overarching error type for the connection/session handlers.
@@ -268,7 +263,7 @@ where
         }
     };
     // The ? operator automatically converts ParsingError into NetworkError::Parsing
-    let request = Request::deserialize(raw_message).map_err(ParsingError::from)?;
+    let request = Request::deserialize(raw_message)?;
 
     Ok(Some(request))
 }
@@ -422,9 +417,10 @@ where
             _ => Response::NotLoggedIn,
         };
 
-        let serialized_response = response
-            .serialize()
-            .map_err(|e| HandlerError::Network(NetworkError::Parsing(e.into())))?;
+        let serialized_response = response.serialize().map_err(|e| HandlerError::Domain {
+            username: None,
+            source: InternalError::Serialize(e),
+        })?;
 
         if let Err(send_err) = stream.send(serialized_response).await {
             send_error_logger(send_err, &address)?;
@@ -577,7 +573,7 @@ where
                             // logged in. So we return the responsibility to the caller.
                             return Err(HandlerError::Domain {
                                 username: Some(session.username.clone()),
-                                source: InternalError::UserNotFound,
+                                source: InternalError::UserShouldExistButWasNotFound,
                             });
                         }
 
@@ -591,7 +587,7 @@ where
                 } else {
                     // if token subtraction was successful...
                     let timestamp = match time_oracle.time_now().duration_since(UNIX_EPOCH) {
-                        Ok(ts) => Timestamp::from(ts.as_nanos()),
+                        Ok(ts) => Timestamp::new(ts.as_nanos()),
                         Err(_) => {
                             return Err(HandlerError::Domain {
                                 username: Some(session.username.clone()),
@@ -603,7 +599,7 @@ where
                     // Here we are using the generic signer, that can be both slow or accelerated.
                     // The check is performed at compile time, super easy and fast.
                     match signer
-                        .generate_timestamp_signature(signing_key, &raw_hash, timestamp)
+                        .generate_timestamp_signature(signing_key, raw_hash, timestamp)
                         .await
                     {
                         Ok(sign) => {
@@ -612,7 +608,29 @@ where
                                 address,
                                 hex::encode(raw_hash)
                             );
-                            Response::Token { sign, timestamp }
+
+                            if let Err(db_err) =
+                                database.add_user_record(username, timestamp, &sign).await
+                            {
+                                return match db_err {
+                                    AddRecordError::UserDoesNotExist => Err(HandlerError::Domain {
+                                        username: Some(session.username.clone()),
+                                        source: InternalError::UserShouldExistButWasNotFound,
+                                    }),
+
+                                    AddRecordError::InternalDataBase(e) => {
+                                        Err(HandlerError::Domain {
+                                            username: Some(session.username.clone()),
+                                            source: InternalError::Database(e),
+                                        })
+                                    }
+                                };
+                            };
+
+                            Response::Token {
+                                sign: Box::new(sign),
+                                timestamp,
+                            }
                         }
 
                         Err(sign_err) => {
@@ -671,7 +689,7 @@ where
                         AddTokensError::UserDoesNotExist => {
                             return Err(HandlerError::Domain {
                                 username: Some(session.username.clone()),
-                                source: InternalError::UserNotFound,
+                                source: InternalError::UserShouldExistButWasNotFound,
                             });
                         }
                         AddTokensError::InternalDataBase(e) => {
@@ -693,7 +711,7 @@ where
                 Err(GetTokensError::UserDoesNotExist) => {
                     return Err(HandlerError::Domain {
                         username: Some(session.username.clone()),
-                        source: InternalError::UserNotFound,
+                        source: InternalError::UserShouldExistButWasNotFound,
                     });
                 }
 
@@ -721,50 +739,46 @@ where
                     Response::History(history)
                 }
 
-                Err(history_err) => match history_err {
-                    UserHistoryError::UserDoesNotExist => {
-                        return Err(HandlerError::Domain {
+                Err(history_err) => {
+                    return match history_err {
+                        UserHistoryError::UserDoesNotExist => Err(HandlerError::Domain {
                             username: Some(session.username.clone()),
-                            source: InternalError::UserNotFound,
-                        });
-                    }
+                            source: InternalError::UserShouldExistButWasNotFound,
+                        }),
 
-                    UserHistoryError::EmptyRecord => {
-                        info!("{} requested their history (it's empty).", session);
-                        Response::EmptyHistory
-                    }
-                    UserHistoryError::TimestampIntegrityViolated(token) => {
-                        return Err(HandlerError::Domain {
-                            username: Some(session.username.clone()),
-                            source: InternalError::IntegrityViolation(format!(
-                                "invalid timestamp of {}",
-                                token
-                            )),
-                        });
-                    }
+                        UserHistoryError::TimestampIntegrityViolated(token) => {
+                            Err(HandlerError::Domain {
+                                username: Some(session.username.clone()),
+                                source: InternalError::IntegrityViolation(format!(
+                                    "invalid timestamp of {}",
+                                    token
+                                )),
+                            })
+                        }
 
-                    UserHistoryError::HashIntegrityViolated(hash) => {
-                        return Err(HandlerError::Domain {
-                            username: Some(session.username.clone()),
-                            source: InternalError::IntegrityViolation(format!(
-                                "invalid hash: {}",
-                                hash
-                            )),
-                        });
-                    }
-                    UserHistoryError::InternalDataBase(e) => {
-                        return Err(HandlerError::Domain {
+                        UserHistoryError::HashIntegrityViolated(hash) => {
+                            Err(HandlerError::Domain {
+                                username: Some(session.username.clone()),
+                                source: InternalError::IntegrityViolation(format!(
+                                    "invalid hash: {}",
+                                    hash
+                                )),
+                            })
+                        }
+
+                        UserHistoryError::InternalDataBase(e) => Err(HandlerError::Domain {
                             username: Some(session.username.clone()),
                             source: InternalError::Database(e),
-                        });
+                        }),
                     }
-                },
+                }
             },
         };
 
-        let serialized_response = response
-            .serialize()
-            .map_err(|e| HandlerError::Network(NetworkError::Parsing(e.into())))?;
+        let serialized_response = response.serialize().map_err(|e| HandlerError::Domain {
+            username: None,
+            source: InternalError::Serialize(e),
+        })?;
 
         if let Err(send_err) = stream.send(serialized_response).await {
             send_error_logger(send_err, address)?;
@@ -781,7 +795,7 @@ mod tests {
     use super::*;
     use futures::{SinkExt, StreamExt};
     use rsa::RsaPrivateKey;
-    use shared_library::server_protocol::{LoginError, Request, Response, SignInError};
+    use shared_library::server_protocol::{LoginError, Request, Response, Sha256Hash, SignInError};
     use std::net::SocketAddr;
     use tokio_util::codec::{Framed, LengthDelimitedCodec};
     use tokio_util::sync::CancellationToken;
@@ -905,9 +919,12 @@ mod tests {
         let resp = Response::deserialize(client.next().await.unwrap().unwrap()).unwrap();
         assert!(matches!(resp, Response::NotLoggedIn));
 
+        let raw_hash = [0u8; 32];
+        let hash = Sha256Hash::from(&raw_hash);
+
         // Try to sign a dummy hash
         client
-            .send(Request::SignHash([0u8; 32]).serialize().unwrap())
+            .send(Request::SignHash(hash).serialize().unwrap())
             .await
             .unwrap();
 
@@ -1011,7 +1028,9 @@ mod tests {
         }
 
         // 2. Request a hash signature (consumes 1 token)
-        let fake_hash = [5u8; 32];
+        let raw_fake_hash = [5u8; 32];
+        let fake_hash = Sha256Hash::from(&raw_fake_hash);
+
         client
             .send(Request::SignHash(fake_hash).serialize().unwrap())
             .await
@@ -1246,8 +1265,10 @@ mod tests {
         let _ = client_framed.next().await;
 
         // First signature send_request (Consumes the only available token)
+        let hash = Sha256Hash::from(&[1u8; 32]);
+
         client_framed
-            .send(Request::SignHash([1u8; 32]).serialize().unwrap())
+            .send(Request::SignHash(hash).serialize().unwrap())
             .await
             .unwrap();
 
@@ -1255,8 +1276,10 @@ mod tests {
         assert!(matches!(resp1, Response::Token { .. })); // Success!
 
         // Second signature send_request (Token balance is now zero)
+        let hash = Sha256Hash::from(&[1u8; 32]);
+
         client_framed
-            .send(Request::SignHash([1u8; 32]).serialize().unwrap())
+            .send(Request::SignHash(hash).serialize().unwrap())
             .await
             .unwrap();
 

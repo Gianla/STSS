@@ -3,7 +3,9 @@ use futures::StreamExt;
 use futures::sink::SinkExt;
 use rsa::RsaPublicKey;
 use rustls::pki_types::CertificateDer;
-use shared_library::server_protocol::{Request, Response, Timestamp};
+use shared_library::server_protocol::{
+    DeserializeError, Request, Response, SerializeError, Sha256Hash, Timestamp,
+};
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -79,12 +81,6 @@ pub enum ClientError {
     #[error("the CA certificate file does not contain any certificate")]
     EmptyCaCertificate,
 
-    #[error("failed to serialize send_request: {0}")]
-    Serialize(#[from] wincode::WriteError),
-
-    #[error("failed to deserialize response: {0}")]
-    Deserialize(#[from] wincode::ReadError),
-
     #[error("server closed the connection before sending a response")]
     ServerClosedConnection,
 
@@ -99,6 +95,12 @@ pub enum ClientError {
 
     #[error("the provided server name {0:?} is invalid")]
     InvalidDnsName(String),
+
+    #[error(transparent)]
+    Serialize(#[from] SerializeError),
+
+    #[error(transparent)]
+    Deserialize(#[from] DeserializeError),
 }
 
 pub struct STSSClient {
@@ -200,7 +202,12 @@ impl STSSClient {
     }
 
     /// Requests a timestamp over an already-computed SHA-256 hash.
-    pub async fn timestamp_hash(&mut self, hash: [u8; 32]) -> Result<Response, ClientError> {
+    pub async fn timestamp_hash(&mut self, hash: Sha256Hash) -> Result<Response, ClientError> {
         self.send_request(Request::SignHash(hash)).await
+    }
+
+    /// Requests the history of the signed hashes.
+    pub async fn history(&mut self) -> Result<Response, ClientError> {
+        self.send_request(Request::History).await
     }
 }

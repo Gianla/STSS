@@ -14,3 +14,5 @@ rsa = "0.10.0-rc.18"
 tokio = { version = "1.52.3", features = ["macros"] }
 clap = { version = "4.6.1", features = ["derive"] }
 anyhow = "1.0.102"
+chrono = "0.4.44"
+hex = "0.4.3"
