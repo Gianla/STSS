@@ -103,6 +103,13 @@ pub struct TimeOracle {
 }
 
 impl TimeOracle {
+    /// Returns a TimeOracle that uses the local time, without syncing with an outsider server.
+    pub fn _new_local() -> Self {
+        Self {
+            offset_nanos: Arc::new(AtomicI64::new(0)),
+        }
+    }
+
     /// Initialize the TimeOracle. This function can also be called from outside the tokio runtime.
     /// Returns a tuple containing the cloneable oracle and the background sync worker.
     pub fn create_bundle(
@@ -168,22 +175,6 @@ impl TimeOracle {
             local_now
                 .checked_sub(Duration::from_nanos(offset.unsigned_abs()))
                 .unwrap_or(local_now)
-        }
-    }
-}
-
-/// An implementation useful when signatures requires a time oracle, but we don't want to create
-/// a "real" one since it isn't needed.
-#[cfg(test)]
-impl TimeOracle {
-    /// We don't need the functionality of a time oracle inside these tests. That's why we just
-    /// implement a function that returns a dummy to shut up the compiler.
-    pub(crate) fn dummy() -> Self {
-        use std::sync::atomic::AtomicI64;
-        use std::sync::Arc;
-
-        Self {
-            offset_nanos: Arc::new(AtomicI64::new(0)),
         }
     }
 }
