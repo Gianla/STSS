@@ -228,9 +228,17 @@ dependencies = [
 name = "certification_authority"
 version = "0.1.0"
 dependencies = [
- "rcgen",
- "rustls",
+ "anyhow",
+ "clap",
+ "futures-util",
+ "serde",
+ "shared_library",
  "thiserror",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
