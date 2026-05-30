@@ -10,7 +10,7 @@ use server::server::STSServer;
 
 #[derive(Parser, Debug)]
 #[command(name = "STSS")]
-#[command(author = "Gianluca Vizziello, Gianmarco de Laurentiis")]
+#[command(author = "Gianluca Vizziello, Gianmarco De Laurentiis")]
 #[command(version = "1.0")]
 #[command(about = "Simple TimeStamp Server, or STSS, is a project for the course Foundation of \
                    Cybersecurity of the Master’s Degree in Cybersecurity, disbursed by University \
