@@ -322,8 +322,8 @@ impl STSServer {
                 "info"
             };
 
-            let filter = EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new(default_level));
+            let filter =
+                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level));
 
             tracing_subscriber::fmt()
                 .with_writer(writer)
@@ -407,7 +407,6 @@ impl STSServer {
             debug!("Server correctly built.");
 
             Ok(build.into())
-
         } else {
             debug!("Using an accelerated signer for cryptography operations.");
 
