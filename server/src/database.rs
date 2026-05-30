@@ -988,6 +988,10 @@ mod tests {
         // Verify that the record was correctly stored and can be retrieved.
         let history = db.get_user_history(user).await.unwrap();
         assert_eq!(history.len(), 1, "History should contain exactly 1 record");
+
+        let record = history.first().unwrap();
+        assert_eq!(timestamp, record.timestamp(), "Timestamps should be equal");
+        assert_eq!(signature, *record.hash(), "Signature doesn't match");
     }
 
     #[tokio::test]
