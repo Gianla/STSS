@@ -7,7 +7,7 @@ use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, PKCS_ED2
 use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
 use rsa::{RsaPrivateKey, RsaPublicKey};
 use server::config::{
-    Config as ServerConfig, KeysConfig, NetworkConfig, RuntimeConfig, TimeOracleConfig,
+    Config as ServerConfig, KeysConfig, NetworkConfig, RuntimeConfig, SyncedTimeOracleConfig,
 };
 use std::collections::HashSet;
 use std::convert::Into;
@@ -671,6 +671,14 @@ impl Generator {
         let ca_cert_path =
             self.get_canonical_path(self.env.server_dir(), self.ca_files.tls_cert_name.as_str())?;
 
+        let default_synced_time_oracle = SyncedTimeOracleConfig::new(
+            "pool.ntp.org".to_string(),
+            123,
+            "0.0.0.0".to_string(),
+            0,
+            5,
+        );
+
         let default = ServerConfig::new(
             NetworkConfig::new(String::from(DEFAULT_SERVER_IP_STR), DEFAULT_SERVER_IP_PORT),
             RuntimeConfig::new(
@@ -678,7 +686,7 @@ impl Generator {
                 if is_crypto_hardware_accelerated { 0 } else { 1 },
             ),
             KeysConfig::new(tls_cert_path, tls_priv_path, tss_priv_path, ca_cert_path),
-            TimeOracleConfig::new("pool.ntp.org".to_string(), 123, "0.0.0.0".to_string(), 0, 5),
+            Some(default_synced_time_oracle),
             None,
         );
 

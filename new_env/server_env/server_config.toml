@@ -1,0 +1,20 @@
+[network]
+ip = "127.0.0.1"
+port = 8080
+
+[runtime]
+working_threads = 4
+cryptography_threads = 0
+
+[keys]
+tls_cert_path = "/home/gianla/RustroverProjects/STSS/new_env/server_env/server_tls_certificate.pem"
+tls_priv_path = "/home/gianla/RustroverProjects/STSS/new_env/server_env/server_tls_private_key.pem"
+tss_priv_path = "/home/gianla/RustroverProjects/STSS/new_env/server_env/server_rsa_priv_key.pem"
+ca_cert_path = "/home/gianla/RustroverProjects/STSS/new_env/server_env/ca_tls_certificate.pem"
+
+[synced_time_oracle]
+ntp_server_host = "pool.ntp.org"
+ntp_server_port = 123
+listener_ip = "0.0.0.0"
+listener_port = 0
+sync_interval_in_minutes = 5

@@ -4,7 +4,7 @@ use crate::connection_handler::{conn_handler, STSServerStateBuilder};
 use crate::connection_handler::{HandlerError, NetworkError, STSServerState};
 use crate::database::{DataBaseBuildError, DataBaseLocation, ServerDataBaseBuilder};
 use crate::server::NetworkPort::{AnyFreePort, Port};
-use crate::time_oracle::{TimeOracleBundle, TimeSyncWorker};
+use crate::time_oracle::{TimeOracleType, TimeSyncWorker};
 
 use rsa::RsaPrivateKey;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -27,6 +27,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info, warn};
 use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::EnvFilter;
 
 /// Where to write logs. For the moment, we support stdout and a filepath (or no logs).
 pub enum LogDestination {
@@ -65,7 +66,7 @@ pub struct ServerContext {
     address: SocketAddr,
     runtime_context: RuntimeContext,
     key_context: KeyContext,
-    time_oracle_bundle: TimeOracleBundle,
+    time_oracle_type: TimeOracleType,
     log_output: LogDestination,
     database_location: DataBaseLocation,
 }
@@ -110,7 +111,7 @@ impl ServerContext {
         address: SocketAddr,
         runtime_context: RuntimeContext,
         key_context: KeyContext,
-        time_oracle_bundle: TimeOracleBundle,
+        time_oracle: TimeOracleType,
         log_output: LogDestination,
         database_location: DataBaseLocation,
     ) -> Self {
@@ -118,7 +119,7 @@ impl ServerContext {
             address,
             runtime_context,
             key_context,
-            time_oracle_bundle,
+            time_oracle_type: time_oracle,
             log_output,
             database_location,
         }
@@ -287,7 +288,7 @@ impl STSServer {
                     tls_priv,
                     tss_priv,
                 },
-            time_oracle_bundle,
+            time_oracle_type,
             log_output,
             database_location,
         }: ServerContext,
@@ -296,14 +297,14 @@ impl STSServer {
             LogDestination::None => None,
             LogDestination::Stdout => {
                 let (writer, guard) = tracing_appender::non_blocking(std::io::stdout());
-                Some((writer, guard, "Logger initialized on stdout".to_string()))
+                Some((writer, guard, "Logger initialized on stdout.".to_string()))
             }
             LogDestination::File { dir, filename } => {
                 let file_appender = tracing_appender::rolling::never(&dir, &filename);
                 let (writer, guard) = tracing_appender::non_blocking(file_appender);
 
                 let msg = if let Some(utf8_path) = Path::new(&dir).join(&filename).to_str() {
-                    format!("Logger initialized to file: {}", utf8_path)
+                    format!("Logger initialized to file: {}.", utf8_path)
                 } else {
                     "Logger initialized to the specified file (non-UTF-8 path).".to_string()
                 };
@@ -315,14 +316,24 @@ impl STSServer {
         let mut _log_guard = None;
 
         if let Some((writer, guard, startup_msg)) = log_setup {
+            let default_level = if cfg!(debug_assertions) {
+                "server=debug,tokio=info"
+            } else {
+                "info"
+            };
+
+            let filter = EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new(default_level));
+
             tracing_subscriber::fmt()
                 .with_writer(writer)
+                .with_env_filter(filter)
                 .try_init()
                 .map_err(|e| STSServerBuildError::Logger(e.to_string()))?;
 
             _log_guard = Some(guard);
 
-            info!(startup_msg);
+            info!("{}", startup_msg);
         }
 
         let mut rt_builder = match working_threads {
@@ -358,13 +369,22 @@ impl STSServer {
             rt.block_on(async { ServerDataBaseBuilder::build(database_location).await })?;
 
         let cancel_token = CancellationToken::new();
-        let (time_oracle, worker) = time_oracle_bundle.into_parts();
-        let time_oracle_worker = Some(worker);
+
+        let (time_oracle, time_oracle_worker) = match time_oracle_type {
+            TimeOracleType::Local(time_oracle) => (time_oracle, None),
+            TimeOracleType::Synced(time_oracle_bundle) => {
+                let (time_oracle, worker) = time_oracle_bundle.into_parts();
+                (time_oracle, Some(worker))
+            }
+        };
+
+        match time_oracle_worker {
+            None => info!("No synced time oracle has been configured, using the local one."),
+            Some(_) => debug!("Using the default synced time oracle."),
+        }
 
         let state =
             STSServerStateBuilder::from_bundle(database, &cancel_token, tss_priv, time_oracle);
-
-        debug!("Server correctly built.");
 
         if do_not_use_hardware_acceleration {
             info!(
@@ -384,7 +404,10 @@ impl STSServer {
                 _log_guard,
             };
 
+            debug!("Server correctly built.");
+
             Ok(build.into())
+
         } else {
             debug!("Using an accelerated signer for cryptography operations.");
 
@@ -396,6 +419,8 @@ impl STSServer {
                 time_oracle_worker,
                 _log_guard,
             };
+
+            debug!("Server correctly built.");
 
             Ok(build.into())
         }
@@ -442,7 +467,10 @@ where
         let mut time_oracle_worker = self.time_oracle_worker.take();
 
         self.runtime.block_on(async {
+            // If some time oracle worker was provided, it means that we want to use the synced
+            // version. If any was provided, it does not matter: we're on the local version.
             if let Some(worker) = time_oracle_worker.take() {
+                debug!("Time Oracle Worker found. Now using the synced time oracle.");
                 tokio::spawn(async move {
                     if let Err(e) = worker.start_syncing().await {
                         error!(
@@ -452,12 +480,6 @@ where
                         token_for_sync.cancel();
                     }
                 });
-            } else {
-                error!(
-                    "[Critical] Worker was already taken, but this should be impossible. \
-                     Interrupting the server."
-                );
-                token_for_sync.cancel();
             }
 
             tokio::spawn(async move {
@@ -645,6 +667,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::time_oracle::TimeOracle;
     use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
     use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
     use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
@@ -715,7 +738,7 @@ mod tests {
                 address,
                 runtime_context,
                 key_context,
-                time_oracle_bundle: TimeOracleBundle::dummy(),
+                time_oracle_type: TimeOracleType::Local(TimeOracle::new_local()),
                 log_output: LogDestination::None,
                 database_location: DataBaseLocation::Memory,
             }

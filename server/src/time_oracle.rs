@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::server::NetworkPort;
 
@@ -26,42 +26,6 @@ impl TimeOracleBundle {
 
     pub fn into_parts(self) -> (TimeOracle, TimeSyncWorker) {
         (self.oracle, self.worker)
-    }
-}
-
-/// A dummy implementation for tests only.
-#[cfg(test)]
-impl TimeOracleBundle {
-    /// Creates a dummy TimeOracleBundle strictly for testing purposes.
-    /// It binds a UDP socket to a random local port to satisfy the worker's structural
-    /// requirements without performing actual network requests.
-    pub(crate) fn dummy() -> Self {
-        use sntpc::{NtpContext, StdTimestampGen};
-        use std::net::UdpSocket;
-        use std::sync::atomic::AtomicI64;
-        use std::sync::Arc;
-        use std::time::Duration;
-
-        let listener = UdpSocket::bind("127.0.0.1:0")
-            .expect("Failed to bind a dummy UDP socket for the testing time oracle");
-
-        listener.set_nonblocking(true).unwrap();
-
-        let offset_nanos = Arc::new(AtomicI64::new(0));
-
-        let oracle = TimeOracle {
-            offset_nanos: offset_nanos.clone(),
-        };
-
-        let worker = TimeSyncWorker {
-            ntp_server_addr: "127.0.0.1:123".parse().unwrap(),
-            listener,
-            sntpc_context: NtpContext::new(StdTimestampGen::default()),
-            sync_interval: Duration::from_secs(3600), // Very long interval, won't trigger in tests
-            offset_nanos,
-        };
-
-        Self::internal_new(oracle, worker)
     }
 }
 
@@ -102,9 +66,17 @@ pub struct TimeOracle {
     offset_nanos: Arc<AtomicI64>,
 }
 
+/// Groups up the types of oracles.
+/// The Local is only based on the system's clock, while the synced is based on a specified NTP
+/// server.
+pub enum TimeOracleType {
+    Local(TimeOracle),
+    Synced(TimeOracleBundle),
+}
+
 impl TimeOracle {
     /// Returns a TimeOracle that uses the local time, without syncing with an outsider server.
-    pub fn _new_local() -> Self {
+    pub fn new_local() -> Self {
         Self {
             offset_nanos: Arc::new(AtomicI64::new(0)),
         }
@@ -271,6 +243,7 @@ impl TimeSyncWorker {
 
                     match compute_offset(ntp_secs, ntp_nanos, SystemTime::now()) {
                         Ok(offset_i64) => {
+                            debug!("Clock resynced with offset {}.", offset_i64);
                             self.offset_nanos.store(offset_i64, Ordering::Relaxed);
                         }
                         Err(e) => return Err(e),

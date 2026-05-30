@@ -22,7 +22,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2.5"
 argon2 = { version = "0.5.3", features = ["password-hash", "std", "rand"] }
 dashmap = "6.2.1"
-sha2 = { version = "0.11.0", features = ["oid"] }
 hex = "0.4.3"
 sntpc = { version = "0.10.1", features = ["std"] }
 sntpc-net-tokio = "1"

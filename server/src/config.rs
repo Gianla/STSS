@@ -11,7 +11,7 @@ use thiserror::Error;
 
 use crate::database::DataBaseLocation;
 use crate::server::{KeyContext, LogDestination, NetworkPort, RuntimeContext, ServerContext};
-use crate::time_oracle::{TimeOracle, TimeOracleError};
+use crate::time_oracle::{TimeOracle, TimeOracleError, TimeOracleType};
 use shared_library::safe_read::{safe_read, SafeReadError};
 
 const PEM_EXT: Option<&str> = Some("pem");
@@ -23,7 +23,7 @@ pub struct Config {
     network: NetworkConfig,
     runtime: RuntimeConfig,
     keys: KeysConfig,
-    time_oracle: TimeOracleConfig,
+    synced_time_oracle: Option<SyncedTimeOracleConfig>,
     log: Option<PathBuf>,
 }
 
@@ -32,14 +32,14 @@ impl Config {
         network: NetworkConfig,
         runtime: RuntimeConfig,
         keys: KeysConfig,
-        time_oracle: TimeOracleConfig,
+        time_oracle: Option<SyncedTimeOracleConfig>,
         log: Option<PathBuf>,
     ) -> Self {
         Self {
             network,
             runtime,
             keys,
-            time_oracle,
+            synced_time_oracle: time_oracle,
             log,
         }
     }
@@ -103,7 +103,7 @@ impl KeysConfig {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct TimeOracleConfig {
+pub struct SyncedTimeOracleConfig {
     ntp_server_host: String,
     ntp_server_port: u16,
     listener_ip: String,
@@ -111,7 +111,7 @@ pub struct TimeOracleConfig {
     sync_interval_in_minutes: u16,
 }
 
-impl TimeOracleConfig {
+impl SyncedTimeOracleConfig {
     pub fn new(
         ntp_server_host: String,
         ntp_server_port: u16,
@@ -222,8 +222,6 @@ impl Config {
             return Err(ServerConfigConversionError::UnreliablePort);
         }
 
-        let ntp_server_port = NetworkPort::from(self.time_oracle.ntp_server_port);
-
         let destination = match self.log {
             Some(path) => {
                 let parent = path.parent().unwrap_or(Path::new(""));
@@ -272,22 +270,37 @@ impl Config {
         let tss_priv = RsaPrivateKey::from_pkcs8_pem(&pem_str)
             .map_err(|e| ServerConfigConversionError::TssKeyParse(e.to_string()))?;
 
-        let time_oracle_ip: IpAddr = IpAddr::from_str(&self.time_oracle.listener_ip)
-            .map_err(|e| ServerConfigConversionError::IpParse(e.to_string()))?;
+        // --- load the time oracle configurations ---
 
-        let time_oracle_address = SocketAddr::new(time_oracle_ip, self.time_oracle.listener_port);
+        let time_oracle = match self.synced_time_oracle {
+            Some(time_oracle_config) => {
+                let ntp_server_port = NetworkPort::from(time_oracle_config.ntp_server_port);
 
-        let interval_in_seconds = match self.time_oracle.sync_interval_in_minutes.checked_mul(60) {
-            None => return Err(ServerConfigConversionError::TooManyMinutes),
-            Some(sync_interval) => sync_interval,
+                let time_oracle_ip: IpAddr = IpAddr::from_str(&time_oracle_config.listener_ip)
+                    .map_err(|e| ServerConfigConversionError::IpParse(e.to_string()))?;
+
+                let time_oracle_address =
+                    SocketAddr::new(time_oracle_ip, time_oracle_config.listener_port);
+
+                let interval_in_seconds =
+                    match time_oracle_config.sync_interval_in_minutes.checked_mul(60) {
+                        None => return Err(ServerConfigConversionError::TooManyMinutes),
+                        Some(sync_interval) => sync_interval,
+                    };
+
+                let bundle = TimeOracle::create_bundle(
+                    time_oracle_config.ntp_server_host,
+                    ntp_server_port,
+                    time_oracle_address,
+                    Duration::from_secs(interval_in_seconds as u64),
+                )?;
+                TimeOracleType::Synced(bundle)
+            }
+            None => {
+                let build = TimeOracle::new_local();
+                TimeOracleType::Local(build)
+            }
         };
-
-        let time_oracle = TimeOracle::create_bundle(
-            self.time_oracle.ntp_server_host,
-            ntp_server_port,
-            time_oracle_address,
-            Duration::from_secs(interval_in_seconds as u64),
-        )?;
 
         Ok(ServerContext::new(
             SocketAddr::new(ip, self.network.port),

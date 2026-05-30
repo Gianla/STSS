@@ -825,7 +825,7 @@ mod tests {
 
         // Generate a fast, small key for testing to avoid slowing down the test suite
         let signing_key = RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap();
-        let time_oracle = TimeOracle::_new_local();
+        let time_oracle = TimeOracle::new_local();
 
         let state =
             STSServerStateBuilder::from_bundle(database, &cancel_token, signing_key, time_oracle)
@@ -1067,7 +1067,7 @@ mod tests {
             database,
             &cancel_token,
             RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap(),
-            TimeOracle::_new_local(),
+            TimeOracle::new_local(),
         )
         .get_accelerated_build();
 
@@ -1127,7 +1127,7 @@ mod tests {
             database,
             &cancel_token,
             RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap(),
-            TimeOracle::_new_local(),
+            TimeOracle::new_local(),
         )
         .get_accelerated_build();
 
@@ -1222,7 +1222,7 @@ mod tests {
             database,
             &cancel_token,
             RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap(),
-            TimeOracle::_new_local(),
+            TimeOracle::new_local(),
         )
         .get_slow_build();
 
