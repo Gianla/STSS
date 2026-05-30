@@ -1,9 +1,0 @@
-[timestamp]
-server_ip = "127.0.0.1"
-server_port = 8080
-server_certificate_name = "127.0.0.1"
-trust_roots_certificates = false
-
-[keys]
-ca_cert_path = "/home/gianla/RustroverProjects/STSS/new_env/client_env/ca_tls_certificate.pem"
-server_rsa_public_key_path = "/home/gianla/RustroverProjects/STSS/new_env/client_env/server_rsa_pub_key.pem"
