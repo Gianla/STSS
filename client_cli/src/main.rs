@@ -3,9 +3,15 @@ use clap::Parser;
 use client_cli::config::Config;
 use client_core::client::STSSClient;
 use client_core::file_hasher::hash_file;
-use shared_library::server_protocol::Response;
+use shared_library::server_protocol::{
+    verify_timestamp_signature, Response, RsaSignature, Sha256Hash, Timestamp,
+};
+use std::fs;
+use std::fs::OpenOptions;
 use std::io::{self, Write};
+use std::ops::Deref;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 #[derive(Parser, Debug)]
 #[command(name = "STSSClient")]
@@ -28,6 +34,20 @@ Available commands:
     history
     exit/quit\
 ";
+
+fn timestamp_format(ts: Timestamp) -> String {
+    let total_nanos: u128 = ts.get();
+
+    const NANOS_PER_SEC: u128 = 1_000_000_000;
+
+    let ts_seconds = (total_nanos / NANOS_PER_SEC) as i64;
+    let ts_nanos = (total_nanos % NANOS_PER_SEC) as u32;
+
+    match chrono::DateTime::from_timestamp(ts_seconds, ts_nanos) {
+        Some(datetime) => datetime.format("%Y-%m-%d %H:%M:%S.%f").to_string(),
+        None => format!("invalid Epoch: {}s {}ns", ts_seconds, ts_nanos),
+    }
+}
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), anyhow::Error> {
@@ -198,71 +218,226 @@ async fn main() -> Result<(), anyhow::Error> {
                     writeln!(&mut stderr, "Usage: buy <amount>")?;
                 }
             }
-            "hash" => {
-                if let Some(path_str) = parts.next() {
-                    let file_path = PathBuf::from(path_str);
 
-                    writeln!(&mut stdout, "[*] Calculating file hash...")?;
-
-                    let hash_result = match hash_file(file_path, None) {
+            "verifyhash" => {
+                let hash = match parts.next() {
+                    Some(raw_hash) => match Sha256Hash::from_str(raw_hash) {
                         Ok(h) => h,
-                        Err(e) => {
-                            writeln!(&mut stderr, "[-] Error reading the file: {:?}", e)?;
+                        Err(_) => {
+                            writeln!(
+                                &mut stderr,
+                                "[-] Usage: verifyhash <hash> <signature_file_path> <timestamp>"
+                            )?;
                             continue;
                         }
-                    };
-
-                    writeln!(&mut stdout, "[*] Requesting signature from the server...")?;
-
-                    match client.timestamp_hash(hash_result).await {
-                        Ok(Response::Token { sign, timestamp }) => {
-                            writeln!(
-                                &mut stdout,
-                                "[+] Hash signed successfully! Timestamp: {}",
-                                timestamp.get()
-                            )?;
-
-                            match client.verify_timestamp_signature(hash_result, timestamp, *sign) {
-                                Ok(_) => writeln!(
-                                    &mut stdout,
-                                    "[+] LOCAL VERIFICATION PASSED: The signature is valid and was \
-                                     produced by the server."
-                                )?,
-
-                                Err(e) => writeln!(
-                                    &mut stderr,
-                                    "[-] WARNING: Local signature verification failed: {:?}",
-                                    e
-                                )?,
-                            }
-                        }
-
-                        Ok(Response::NotEnoughTokens) => writeln!(
+                    },
+                    None => {
+                        writeln!(
                             &mut stderr,
-                            "[-] Error: not enough tokens for this operation. Use the 'buy' \
-                             command to recharge."
-                        )?,
-
-                        Ok(Response::NotLoggedIn) => {
-                            writeln!(&mut stderr, "[-] Error: you must log in first.")?
-                        }
-
-                        Ok(Response::OperationError(msg)) => {
-                            writeln!(&mut stderr, "[-] Server operation error: {}", msg)?
-                        }
-
-                        Ok(unexpected) => writeln!(
-                            &mut stderr,
-                            "[!] Unexpected response to hash signature request: {:?}",
-                            unexpected
-                        )?,
-
-                        Err(e) => writeln!(&mut stderr, "[!] Network/client error: {:?}", e)?,
+                            "[-] Usage: verifyhash <hash> <signature_file_path> <timestamp>"
+                        )?;
+                        continue;
                     }
-                } else {
-                    writeln!(&mut stderr, "Usage: hash <file_path>")?;
+                };
+
+                let sign_file_path = match parts.next() {
+                    Some(path) => PathBuf::from(path),
+                    None => {
+                        writeln!(
+                            &mut stderr,
+                            "[-] Usage: verifyhash <hash> <signature_file_path> <timestamp>"
+                        )?;
+                        continue;
+                    }
+                };
+
+                let sign = match fs::read(sign_file_path) {
+                    Ok(raw_sign) => match RsaSignature::try_from(raw_sign.as_slice()) {
+                        Ok(s) => s,
+                        Err(_) => {
+                            writeln!(
+                                &mut stderr,
+                                "[-] Invalid content inside of the specified sign path. The length \
+                                 doesn't match the size of a RSA signature."
+                            )?;
+                            continue;
+                        }
+                    },
+
+                    Err(e) => {
+                        writeln!(
+                            &mut stderr,
+                            "[-] Error while reading the specified signature file: {}.",
+                            e
+                        )?;
+                        continue;
+                    }
+                };
+
+                let timestamp = match parts.next() {
+                    Some(raw_timestamp) => match raw_timestamp.parse::<u128>() {
+                        Ok(ts) => Timestamp::new(ts),
+                        Err(_) => {
+                            writeln!(
+                                &mut stderr,
+                                "[-] Invalid timestamp {:?}. Must be an unsigned integer of 128 \
+                                 bits.",
+                                raw_timestamp
+                            )?;
+                            continue;
+                        }
+                    },
+                    None => {
+                        writeln!(
+                            &mut stderr,
+                            "[-] Usage: verifyhash <hash> <signature_file_path> <timestamp>"
+                        )?;
+                        continue;
+                    }
+                };
+
+                match verify_timestamp_signature(
+                    client.server_rsa_public_key(),
+                    hash,
+                    timestamp,
+                    &sign,
+                ) {
+                    Ok(_) => writeln!(
+                        &mut stdout,
+                        "[+] The signature is valid and was produced by the server."
+                    )?,
+
+                    Err(e) => writeln!(&mut stderr, "[-] Signature verification failed: {:?}", e)?,
                 }
             }
+
+            "hash" => {
+                let file_path = match parts.next() {
+                    Some(path) => PathBuf::from(path),
+                    None => {
+                        writeln!(
+                            &mut stderr,
+                            "[-] Usage: hash <path_to_file_to_hash> <output_path>"
+                        )?;
+                        continue;
+                    }
+                };
+
+                let output_path = match parts.next() {
+                    Some(path) => PathBuf::from(path),
+                    None => {
+                        writeln!(
+                            &mut stderr,
+                            "[-] Usage: hash <path_to_file_to_hash> <output>"
+                        )?;
+                        continue;
+                    }
+                };
+
+                let mut output_file = match OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&output_path)
+                {
+                    Ok(f) => f,
+                    Err(e) => {
+                        writeln!(
+                            &mut stderr,
+                            "Error while creating the output file at {}: {}. \
+                             The request won't be sent.",
+                            output_path.to_string_lossy(),
+                            e
+                        )?;
+                        continue;
+                    }
+                };
+
+                writeln!(&mut stdout, "[*] Calculating file hash...")?;
+
+                let hash_result = match hash_file(file_path, None) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        writeln!(&mut stderr, "[-] Error reading the file: {:?}", e)?;
+                        continue;
+                    }
+                };
+
+                writeln!(&mut stdout, "[*] Requesting signature from the server...")?;
+
+                match client.timestamp_hash(hash_result).await {
+                    Ok(Response::Token {
+                        hash,
+                        sign,
+                        timestamp,
+                    }) => {
+                        // we want to continue the line later so no "ln" here.
+                        write!(
+                            &mut stdout,
+                            "[+] Hash {} signed successfully at time: {} (formally: {}). ",
+                            hash,
+                            timestamp_format(timestamp),
+                            timestamp,
+                        )?;
+
+                        if let Err(write_err) = output_file.write(sign.deref().as_ref()) {
+                            writeln!(
+                                &mut stdout,
+                                "\n[-] Could not write the signature at the specified file: {}, \
+                                dumping it to the standard output in hex: \n{}",
+                                write_err,
+                                sign,
+                            )?;
+                        } else {
+                            writeln!(
+                                &mut stdout,
+                                "Signature has been saved on the specified file."
+                            )?;
+                        }
+
+                        match verify_timestamp_signature(
+                            client.server_rsa_public_key(),
+                            hash_result,
+                            timestamp,
+                            sign.deref(),
+                        ) {
+                            Ok(_) => writeln!(
+                                &mut stdout,
+                                "[+] LOCAL VERIFICATION PASSED: The signature is valid and was \
+                                 produced by the server."
+                            )?,
+
+                            Err(e) => writeln!(
+                                &mut stderr,
+                                "[-] WARNING: Local signature verification failed: {:?}",
+                                e
+                            )?,
+                        }
+                    }
+
+                    Ok(Response::NotEnoughTokens) => writeln!(
+                        &mut stderr,
+                        "[-] Error: not enough tokens for this operation. Use the 'buy' \
+                         command to recharge."
+                    )?,
+
+                    Ok(Response::NotLoggedIn) => {
+                        writeln!(&mut stderr, "[-] Error: you must log in first.")?
+                    }
+
+                    Ok(Response::OperationError(msg)) => {
+                        writeln!(&mut stderr, "[-] Server operation error: {}", msg)?
+                    }
+
+                    Ok(unexpected) => writeln!(
+                        &mut stderr,
+                        "[!] Unexpected response to hash signature request: {:?}",
+                        unexpected
+                    )?,
+
+                    Err(e) => writeln!(&mut stderr, "[!] Network/client error: {:?}", e)?,
+                }
+            }
+
             "history" => match client.history().await {
                 Ok(Response::History(history)) => {
                     if history.is_empty() {
@@ -311,9 +486,11 @@ async fn main() -> Result<(), anyhow::Error> {
 
                 Err(e) => writeln!(&mut stderr, "[!] Network/client error: {:?}", e)?,
             },
+
             "help" => {
                 writeln!(&mut stdout, "{}", HELP_MSG)?;
             }
+
             _ => {
                 writeln!(
                     &mut stderr,

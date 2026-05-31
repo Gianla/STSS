@@ -5,12 +5,13 @@ use wincode::{ReadResult, SchemaRead, SchemaWrite, WriteResult};
 
 #[derive(Debug, SchemaWrite, SchemaRead)]
 pub enum Request {
-    CertificateSign(Vec<u8>), // todo: add the cert type
+    CertificateSign { raw_cert: Vec<u8> },
 }
 
 #[derive(Debug, SchemaWrite, SchemaRead)]
 pub enum Response {
-    Ok,
+    Ok { pem_cert: String },
+    CanNotSignTheCertificate { reason: String },
 }
 
 const MAX_ALLOCATION_SIZE: usize = 4 * 1024 * 1024;

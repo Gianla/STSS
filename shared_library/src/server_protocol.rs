@@ -3,6 +3,8 @@
 use const_format::concatcp;
 use rsa::{Pkcs1v15Sign, RsaPrivateKey, RsaPublicKey};
 use sha2::{Digest, Sha256};
+use std::fmt::{Display, Formatter};
+use std::str::FromStr;
 use thiserror::Error;
 use wincode::config::Configuration;
 use wincode::{SchemaRead, SchemaWrite};
@@ -20,6 +22,29 @@ impl Sha256Hash {
 
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
+    }
+}
+
+impl Display for Sha256Hash {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex::encode(self.0))
+    }
+}
+
+#[derive(Debug)]
+pub enum Sha256ParseError {
+    InvalidHex(hex::FromHexError),
+}
+
+impl FromStr for Sha256Hash {
+    type Err = Sha256ParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut bytes = [0u8; 32];
+
+        hex::decode_to_slice(s, &mut bytes).map_err(Sha256ParseError::InvalidHex)?;
+
+        Ok(Self(bytes))
     }
 }
 
@@ -87,6 +112,16 @@ impl From<&[u8; RSA_KEY_SIZE_IN_BYTES]> for RsaSignature {
     }
 }
 
+impl Display for RsaSignature {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "------ BEGIN SERVER SIGNATURE ------")?;
+        writeln!(f, "{}", hex::encode(self.0))?;
+        writeln!(f, "------- END SERVER SIGNATURE -------")?;
+
+        Ok(())
+    }
+}
+
 /// Timestamp type wrapper.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, SchemaWrite, SchemaRead)]
 pub struct Timestamp(u128);
@@ -112,6 +147,12 @@ impl Timestamp {
 
     pub fn as_be_bytes(&self) -> [u8; 16] {
         self.0.to_be_bytes()
+    }
+}
+
+impl Display for Timestamp {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -142,7 +183,7 @@ pub fn sign_with_timestamp(
 ) -> Result<RsaSignature, rsa::Error> {
     let mut hasher = Sha256::new();
 
-    hasher.update(hash_to_sign.as_bytes());
+    hasher.update(hash_to_sign);
     hasher.update(timestamp.get().to_be_bytes());
 
     let combined_hash: Sha256Hash = hasher.finalize().into();
@@ -161,7 +202,7 @@ pub fn sign_with_timestamp(
 /// Verify a signature.
 #[inline(always)]
 pub fn verify_timestamp_signature(
-    public_key: impl AsRef<RsaPublicKey>,
+    public_key: &RsaPublicKey,
     hash_to_verify: Sha256Hash,
     timestamp: Timestamp,
     signature: &RsaSignature,
@@ -175,9 +216,7 @@ pub fn verify_timestamp_signature(
 
     let padding = Pkcs1v15Sign::new::<Sha256>();
 
-    public_key
-        .as_ref()
-        .verify(padding, combined_hash.as_bytes(), signature.as_ref())
+    public_key.verify(padding, combined_hash.as_bytes(), signature.as_ref())
 }
 
 /// Used when a user asks their history record(s).
@@ -251,6 +290,7 @@ pub enum Response {
     TokenAmountTooHigh,
     NotEnoughTokens,
     Token {
+        hash: Sha256Hash,
         sign: Box<RsaSignature>,
         timestamp: Timestamp,
     },

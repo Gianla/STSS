@@ -10,7 +10,7 @@ rustls-pemfile = "2.2.0"
 shared_library = { version = "0.1.0", path = "../shared_library" }
 client_core = { version = "0.1.0", path = "../client_core" }
 serde = { version = "1.0.228", features = ["derive"] }
-rsa = "0.10.0-rc.18"
+rsa = "0.9.10"
 tokio = { version = "1.52.3", features = ["macros"] }
 clap = { version = "4.6.1", features = ["derive"] }
 anyhow = "1.0.102"

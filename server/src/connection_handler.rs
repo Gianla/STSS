@@ -628,6 +628,7 @@ where
                             };
 
                             Response::Token {
+                                hash: raw_hash,
                                 sign: Box::new(sign),
                                 timestamp,
                             }

@@ -127,7 +127,7 @@ impl<const CHUNK_SIZE: usize> GenericSafeFileReader<CHUNK_SIZE> {
             )
         })?;
 
-        #[cfg(not(target_pointer_width = "32"))]
+        #[cfg(target_pointer_width = "64")]
         let allocation_size = self.total_size as usize;
 
         // Securely pre-allocate the final vector.

@@ -2,11 +2,11 @@
 
 use anyhow::{Context, Result};
 use clap::{ArgGroup, Parser};
-use std::net::SocketAddr;
-use std::path::PathBuf;
-
+use rcgen::DnValue;
 use server::config::Config;
 use server::server::STSServer;
+use std::net::{IpAddr, SocketAddr};
+use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(name = "STSS")]
@@ -22,19 +22,42 @@ use server::server::STSServer;
 ))]
 struct Cli {
     /// Starts the server with a configuration file.
-    #[arg(short, long, value_name = "FILE")]
+    #[arg(long)]
     config: Option<PathBuf>,
 
-    /// Starts the server in order to renew its certificate by asking the specified CA.
-    #[arg(short, long, value_name = "ADDRESS")]
-    rekey: Option<SocketAddr>,
+    /// Starts the server in rekey mode.
+    #[arg(long)]
+    rekey: bool,
+
+    #[arg(long, requires = "rekey")]
+    address: Option<SocketAddr>,
+
+    #[arg(long, requires = "rekey")]
+    ca_name: Option<String>,
+
+    #[arg(long, requires = "rekey")]
+    server_ip: Option<IpAddr>,
+
+    #[arg(long, value_parser = parse_dn_value, requires = "rekey")]
+    organization_name: Option<DnValue>,
+
+    #[arg(long, value_parser = parse_dn_value, requires = "rekey")]
+    server_name: Option<DnValue>,
+}
+
+fn parse_dn_value(s: &str) -> Result<DnValue, String> {
+    if s.is_empty() {
+        return Err(format!("failed to convert {}", s));
+    }
+
+    Ok(DnValue::Utf8String(s.to_string()))
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
     if let Some(toml_file) = cli.config {
-        let config = Config::from_file(toml_file)
+        let config = Config::from_file(&toml_file)
             .context("Error while obtaining the configurations from the file")?;
 
         let server_context = config
@@ -46,12 +69,17 @@ fn main() -> Result<()> {
 
         server
             .run()
-            .context("Running the server resulted into an error")
-    } else if let Some(_ca_address) = cli.rekey {
-        println!("This is to do!");
-        Ok(())
-    } else {
-        println!("Invalid input, but this has to be done yet!");
-        Ok(())
+            .context("Running the server resulted into an error")?;
+    } else if cli.rekey {
+        unimplemented!()
+        /*
+        let address = cli.address.unwrap();
+        let ca_name = cli.ca_name.unwrap();
+        let server_ip = cli.server_ip.unwrap();
+        let organization_name = cli.organization_name.unwrap();
+        let server_name = cli.server_name.unwrap();
+         */
     }
+
+    Ok(())
 }

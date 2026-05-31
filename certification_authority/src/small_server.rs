@@ -140,9 +140,9 @@ async fn handle_client(stream: TcpStream, context: CaContext) -> Result<(), Clie
 
 async fn handle_request(request: Request, context: &CaContext) -> Response {
     match request {
-        Request::CertificateSign(raw_request) => {
+        Request::CertificateSign { raw_cert } => {
             info!(
-                request_size = raw_request.len(),
+                request_size = raw_cert.len(),
                 ca_cert_bytes = context.ca_cert_pem.len(),
                 ca_key_bytes = context.ca_key_pem.len(),
                 "certificate-signing request received"
@@ -164,7 +164,9 @@ async fn handle_request(request: Request, context: &CaContext) -> Response {
                 Until then, the CA safely acknowledges the request.
             */
 
-            Response::Ok
+            Response::Ok {
+                pem_cert: "".to_string(),
+            }
         }
     }
 }

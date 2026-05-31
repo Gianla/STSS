@@ -335,7 +335,7 @@ dependencies = [
  "clap",
  "client_core",
  "hex",
- "rsa 0.10.0-rc.18",
+ "rsa 0.9.10",
  "rustls-pemfile",
  "serde",
  "shared_library",
@@ -351,7 +351,7 @@ dependencies = [
  "bytes",
  "futures",
  "hex",
- "rsa 0.10.0-rc.18",
+ "rsa 0.9.10",
  "rustls",
  "sha2 0.11.0",
  "shared_library",
@@ -1894,6 +1894,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -1942,10 +1943,9 @@ dependencies = [
 name = "shared_library"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "bytes",
- "chrono",
  "const_format",
+ "hex",
  "rsa 0.9.10",
  "sha2 0.10.9",
  "thiserror",
