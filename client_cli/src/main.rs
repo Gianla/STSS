@@ -3,16 +3,16 @@ use clap::Parser;
 use client_cli::config::Config;
 use client_core::client::STSSClient;
 use client_core::file_hasher::hash_file;
+use indicatif::ProgressBar;
 use inquire::{CustomType, Password, Select, Text};
 use shared_library::server_protocol::{
-    verify_timestamp_signature, Response, RsaSignature, Sha256Hash, Timestamp,
+    Response, RsaSignature, Sha256Hash, Timestamp, verify_timestamp_signature,
 };
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::ops::Deref;
 use std::path::PathBuf;
 use std::str::FromStr;
-use indicatif::ProgressBar;
 use std::time::Duration;
 
 #[derive(Parser, Debug)]
@@ -26,7 +26,6 @@ struct Args {
 
 macro_rules! spin_while_wait {
     ($msg:expr, $operation:expr) => {{
-
         let pb = ProgressBar::new_spinner();
         pb.set_message($msg);
         pb.enable_steady_tick(Duration::from_millis(100));
@@ -55,8 +54,8 @@ fn timestamp_format(ts: Timestamp) -> String {
 async fn main() -> Result<(), anyhow::Error> {
     let args = Args::parse();
 
-    let config = Config::from_file(args.config)
-        .context("Error while reading the configuration file")?;
+    let config =
+        Config::from_file(args.config).context("Error while reading the configuration file")?;
 
     let context = config
         .to_client_context()
@@ -203,7 +202,10 @@ async fn main() -> Result<(), anyhow::Error> {
                         &sign,
                     ) {
                         Ok(_) => println!("[+] The signature is valid and produced by the server."),
-                        Err(e) => eprintln!("[-] Signature verification failed, the file was not produced by the server or some parameter(s) is(are) wrong."),
+                        Err(_) => eprintln!(
+                            "[-] Signature verification failed, the file was not produced by the \
+                             server or some parameter(s) is(are) wrong."
+                        ),
                     }
                 } else {
                     eprintln!("[-] Operation cancelled.");
@@ -225,7 +227,11 @@ async fn main() -> Result<(), anyhow::Error> {
                     {
                         Ok(f) => f,
                         Err(e) => {
-                            eprintln!("[-] Error creating output file {}: {}", output_path.display(), e);
+                            eprintln!(
+                                "[-] Error creating output file {}: {}",
+                                output_path.display(),
+                                e
+                            );
                             continue;
                         }
                     };
@@ -245,7 +251,11 @@ async fn main() -> Result<(), anyhow::Error> {
                         "[*] Requesting signature from the server...",
                         client.timestamp_hash(hash_result).await
                     ) {
-                        Ok(Response::Token { hash, sign, timestamp }) => {
+                        Ok(Response::Token {
+                            hash,
+                            sign,
+                            timestamp,
+                        }) => {
                             print!(
                                 "[+] Hash {} signed successfully at time: {} (formally: {}). ",
                                 hash,
@@ -270,10 +280,14 @@ async fn main() -> Result<(), anyhow::Error> {
                                 sign.deref(),
                             ) {
                                 Ok(_) => println!("[+] LOCAL VERIFICATION PASSED."),
-                                Err(e) => eprintln!("[-] WARNING: Local verification failed: {:?}", e),
+                                Err(e) => {
+                                    eprintln!("[-] WARNING: Local verification failed: {:?}", e)
+                                }
                             }
                         }
-                        Ok(Response::NotEnoughTokens) => eprintln!("[-] Error: not enough tokens. Use 'Buy Tokens'."),
+                        Ok(Response::NotEnoughTokens) => {
+                            eprintln!("[-] Error: not enough tokens. Use 'Buy Tokens'.")
+                        }
                         Ok(Response::NotLoggedIn) => eprintln!("[-] Error: you must log in first."),
                         Ok(Response::OperationError(msg)) => eprintln!("[-] Server error: {}", msg),
                         Ok(unexpected) => eprintln!("[!] Unexpected response: {:?}", unexpected),
@@ -294,14 +308,12 @@ async fn main() -> Result<(), anyhow::Error> {
                         println!("{:-<22}-|-{:-<35}", "", "");
 
                         for record in history {
-                            let ts_seconds: i64 = record
-                                .timestamp()
-                                .get()
-                                .try_into()
-                                .unwrap_or_else(|_| {
+                            let ts_seconds: i64 =
+                                record.timestamp().get().try_into().unwrap_or_else(|_| {
                                     eprintln!(
                                         "[-] Warning: timestamp exceeds the limits that are, in \
-                                         theory, sufficient forever.");
+                                         theory, sufficient forever."
+                                    );
                                     0
                                 });
 
@@ -311,7 +323,8 @@ async fn main() -> Result<(), anyhow::Error> {
                             };
 
                             let sig_hex = hex::encode(record.hash().as_bytes());
-                            let short_sig = format!("{}...{}", &sig_hex[..8], &sig_hex[sig_hex.len() - 8..]);
+                            let short_sig =
+                                format!("{}...{}", &sig_hex[..8], &sig_hex[sig_hex.len() - 8..]);
 
                             println!("{:<22} | {}", time_str, short_sig);
                         }
