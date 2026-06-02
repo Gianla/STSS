@@ -688,6 +688,7 @@ impl Generator {
             KeysConfig::new(tls_cert_path, tls_priv_path, tss_priv_path, ca_cert_path),
             Some(default_synced_time_oracle),
             None,
+            None,
         );
 
         let toml_default = toml::to_string_pretty(&default)

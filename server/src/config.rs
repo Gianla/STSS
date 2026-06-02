@@ -25,6 +25,7 @@ pub struct Config {
     keys: KeysConfig,
     synced_time_oracle: Option<SyncedTimeOracleConfig>,
     log: Option<PathBuf>,
+    database_path: Option<PathBuf>,
 }
 
 impl Config {
@@ -32,15 +33,17 @@ impl Config {
         network: NetworkConfig,
         runtime: RuntimeConfig,
         keys: KeysConfig,
-        time_oracle: Option<SyncedTimeOracleConfig>,
+        synced_time_oracle: Option<SyncedTimeOracleConfig>,
         log: Option<PathBuf>,
+        database_path: Option<PathBuf>,
     ) -> Self {
         Self {
             network,
             runtime,
             keys,
-            synced_time_oracle: time_oracle,
+            synced_time_oracle,
             log,
+            database_path,
         }
     }
 }
@@ -302,6 +305,11 @@ impl Config {
             }
         };
 
+        let database_location = match self.database_path {
+            None => DataBaseLocation::Memory,
+            Some(path) => DataBaseLocation::Disk(path),
+        };
+
         Ok(ServerContext::new(
             SocketAddr::new(ip, self.network.port),
             RuntimeContext::new(
@@ -311,7 +319,7 @@ impl Config {
             KeyContext::new(tls_certs, tls_priv, tss_priv),
             time_oracle,
             destination,
-            DataBaseLocation::Memory,
+            database_location,
         ))
     }
 }
