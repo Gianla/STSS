@@ -246,6 +246,8 @@ dependencies = [
  "anyhow",
  "clap",
  "futures-util",
+ "rcgen",
+ "rustls-pki-types",
  "serde",
  "shared_library",
  "thiserror",

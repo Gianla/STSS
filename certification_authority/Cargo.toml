@@ -7,6 +7,8 @@ edition.workspace = true
 anyhow = "1.0.102"
 clap = { version = "4.6.1", features = ["derive"] }
 futures-util = { version = "0.3.32", features = ["sink"] }
+rcgen = { version = "0.14.8", features = ["pem", "x509-parser"] }
+rustls-pki-types = "1.13.0"
 serde = { version = "1.0.228", features = ["derive"]}
 shared_library = { path = "../shared_library" }
 thiserror = "2.0.18"

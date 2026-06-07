@@ -109,6 +109,7 @@ pub const DEFAULT_SERVER_ENV_SUBDIR: &str = "server_env";
 pub const DEFAULT_CA_ENV_SUBDIR: &str = "ca_env";
 pub const DEFAULT_SERVER_IP_STR: &str = "127.0.0.1";
 pub const DEFAULT_SERVER_IP_PORT: u16 = 8080;
+pub const DEFAULT_CA_IP_PORT: u16 = 8081;
 
 /// Groups the folders for the three actors.
 pub struct EnvironmentGenerator {
@@ -726,7 +727,22 @@ impl Generator {
     }
 
     fn generate_ca_toml(&self) -> Result<(), TomlGenError> {
-        // unimplemented!();
-        Ok(())
+        let ca_cert_path =
+            self.get_canonical_path(self.env.ca_dir(), self.ca_files.tls_cert_name.as_str())?;
+        let ca_key_path =
+            self.get_canonical_path(self.env.ca_dir(), self.ca_files.tls_key_name.as_str())?;
+
+        let toml_default = format!(
+            "[network]\nip = \"{}\"\nport = {}\n\n[keys]\nca_cert_path = \"{}\"\nca_key_path = \"{}\"\n",
+            DEFAULT_SERVER_IP_STR,
+            DEFAULT_CA_IP_PORT,
+            ca_cert_path.display(),
+            ca_key_path.display(),
+        );
+
+        let final_path = self.env.ca_dir.join(&self.ca_files.toml_name);
+
+        fs::write(&final_path, toml_default)
+            .map_err(|e| TomlGenError::Io(final_path.to_string_lossy().to_string(), e))
     }
 }

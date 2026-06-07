@@ -1,5 +1,7 @@
 use crate::config::CaContext;
 use futures_util::{SinkExt, StreamExt};
+use rcgen::{CertificateSigningRequestParams, Issuer, KeyPair};
+use rustls_pki_types::CertificateSigningRequestDer;
 use shared_library::ca_protocol::{Request, Response};
 use thiserror::Error;
 use tokio::net::{TcpListener, TcpStream};
@@ -27,6 +29,24 @@ enum ClientHandlingError {
 
     #[error("cannot serialize CA response: {0}")]
     Encode(String),
+
+    #[error("CA key material is not valid UTF-8: {0}")]
+    KeyNotUtf8(String),
+
+    #[error("CA certificate is not valid UTF-8: {0}")]
+    CertNotUtf8(String),
+
+    #[error("cannot parse CA private key: {0}")]
+    CaKey(String),
+
+    #[error("cannot build CA issuer: {0}")]
+    CaIssuer(String),
+
+    #[error("cannot parse certificate signing request: {0}")]
+    Csr(String),
+
+    #[error("cannot sign certificate signing request: {0}")]
+    Sign(String),
 }
 
 pub struct SmallServer {
@@ -148,25 +168,53 @@ async fn handle_request(request: Request, context: &CaContext) -> Response {
                 "certificate-signing request received"
             );
 
-            /*
-                For now we cannot return a signed certificate because the shared
-                CA protocol currently defines only:
+            match sign_certificate_request(raw_cert, context) {
+                Ok(pem_cert) => {
+                    info!(
+                        pem_cert_bytes = pem_cert.len(),
+                        "certificate signed successfully by CA"
+                    );
 
-                    Response::Ok
+                    Response::Ok { pem_cert }
+                }
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        "certificate-signing request rejected"
+                    );
 
-                The real signing logic can be added here later, after deciding
-                what `raw_request` contains:
-
-                    - CSR bytes,
-                    - server public key plus subject data,
-                    - or a custom serialized STSS structure.
-
-                Until then, the CA safely acknowledges the request.
-            */
-
-            Response::Ok {
-                pem_cert: "".to_string(),
+                    Response::CanNotSignTheCertificate {
+                        reason: e.to_string(),
+                    }
+                }
             }
         }
     }
+}
+
+fn sign_certificate_request(
+    raw_csr: Vec<u8>,
+    context: &CaContext,
+) -> Result<String, ClientHandlingError> {
+    let ca_key_pem = std::str::from_utf8(&context.ca_key_pem)
+        .map_err(|e| ClientHandlingError::KeyNotUtf8(e.to_string()))?;
+
+    let ca_cert_pem = std::str::from_utf8(&context.ca_cert_pem)
+        .map_err(|e| ClientHandlingError::CertNotUtf8(e.to_string()))?;
+
+    let ca_key_pair =
+        KeyPair::from_pem(ca_key_pem).map_err(|e| ClientHandlingError::CaKey(e.to_string()))?;
+
+    let ca_issuer = Issuer::from_ca_cert_pem(ca_cert_pem, ca_key_pair)
+        .map_err(|e| ClientHandlingError::CaIssuer(e.to_string()))?;
+
+    let csr_der = CertificateSigningRequestDer::from(raw_csr);
+    let csr_params = CertificateSigningRequestParams::from_der(&csr_der)
+        .map_err(|e| ClientHandlingError::Csr(e.to_string()))?;
+
+    let signed_certificate = csr_params
+        .signed_by(&ca_issuer)
+        .map_err(|e| ClientHandlingError::Sign(e.to_string()))?;
+
+    Ok(signed_certificate.pem())
 }

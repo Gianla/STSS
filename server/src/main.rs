@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use clap::{ArgGroup, Parser};
 use rcgen::DnValue;
 use server::config::Config;
+use server::rekey::RekeyClient;
 use server::server::STSServer;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
@@ -71,14 +72,34 @@ fn main() -> Result<()> {
             .run()
             .context("Running the server resulted into an error")?;
     } else if cli.rekey {
-        unimplemented!()
-        /*
-        let address = cli.address.unwrap();
-        let ca_name = cli.ca_name.unwrap();
-        let server_ip = cli.server_ip.unwrap();
-        let organization_name = cli.organization_name.unwrap();
-        let server_name = cli.server_name.unwrap();
-         */
+        let address = cli.address.expect("missing CA address");
+        let ca_name = cli.ca_name.expect("missing CA name");
+        let server_ip = cli.server_ip.expect("missing server IP");
+        let organization_name = cli.organization_name.expect("missing organization name");
+        let server_name = cli.server_name.expect("missing server name");
+
+        let output = PathBuf::from("new_server_tls_certificate.pem");
+
+        let runtime = tokio::runtime::Runtime::new()
+            .context("Error while creating Tokio runtime for rekey mode")?;
+
+        runtime.block_on(async move {
+            let client = RekeyClient::new(
+                server_ip,
+                organization_name,
+                server_name,
+                ca_name,
+                output,
+                address,
+            )
+            .await
+            .context("Error while connecting to the Certification Authority")?;
+
+            client
+                .new_cert_sign_request()
+                .await
+                .context("Error while requesting a signed certificate from the CA")
+        })?;
     }
 
     Ok(())
