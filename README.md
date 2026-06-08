@@ -29,16 +29,19 @@ respective configuration file to be run, for example:
 ```bash
 cargo run --bin server -- --config /path/to/your/server_config.toml
 ```
+The CA is not required to be on for this command.
 
 ### Run the Client's cli implementation
 ```bash
 cargo run --bin client_cli -- --config /path/to/your/client_config.toml
 ```
+This will obviously fail if the server is not running.
 
 ### Run the CA
 ```bash
 cargo run --bin certification_authority -- --config /path/to/your/ca_config.toml
 ```
+Running the CA allows the server to be run in `rekey` mode, which requires that to be running in order to refresh its certificate and make the CA sign it. For more information, check the `server`'s `README.md` inside its folder.
 
 ## Server configuration
 
@@ -64,8 +67,10 @@ operations.
 
 The server holds an `SQLite` database and a time syncing service that can be further configured. `terraform` already
 generates the ones that we consider the most useful ones considering the average system and environment the server
-will be run on. However, if it is wanted to obtain specific configurations, the Server's crate holds many more 
+will be run on. However, if it is wanted to obtain specific configurations, the `server`'s crate holds many more 
 information on how to do so.
+
+The `certification_authority` and the `client` are also configurable, please check the related crates for further information.
 
 # Disclaimer
 
