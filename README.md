@@ -36,8 +36,9 @@ cargo run --bin client_cli -- --config /path/to/your/client_config.toml
 ```
 
 ### Run the CA
-the CA is currently under development and will be available soon.
-
+```bash
+cargo run --bin certification_authority -- --config /path/to/your/ca_config.toml
+```
 
 ## Server configuration
 
