@@ -5,7 +5,8 @@ use dashmap::DashSet;
 use futures::{SinkExt, StreamExt};
 use rsa::RsaPrivateKey;
 use shared_library::server_protocol::{
-    DeserializeError, LoginError, Request, Response, SerializeError, SignInError, Timestamp,
+    is_password_length_valid, is_username_length_valid, DeserializeError, LoginError, Request,
+    Response, SerializeError, SignInError, Timestamp, MAX_PASSWORD_LEN, MAX_USERNAME_LEN,
 };
 use std::fmt::{Display, Formatter};
 use std::io::ErrorKind;
@@ -268,6 +269,23 @@ where
     Ok(Some(request))
 }
 
+fn credentials_length_error(username: &str, password: &str) -> Option<String> {
+    if !is_username_length_valid(username) {
+        return Some(format!(
+            "Username is too long. Maximum allowed length is {} characters.",
+            MAX_USERNAME_LEN
+        ));
+    }
+
+    if !is_password_length_valid(password) {
+        return Some(format!(
+            "Password is too long. Maximum allowed length is {} characters.",
+            MAX_PASSWORD_LEN
+        ));
+    }
+    None
+}
+
 // Function conn_handler() and other functions called by it must remain lightweight and
 // non-intensive on the CPU; however, they can and should be I/O intensive while leveraging the
 // asynchronous programming pattern.
@@ -333,82 +351,92 @@ where
 
         let mut started_session = None;
 
+        // Avoid user enumeration. We first control if the user exists and if the password
+        // is correct. Only then, we control if the user is already logged in. This way,
+        // an attacker can't understand if any user is online, without knowing the password.
+
         let response: Response = match request {
             Request::Login(username, password) => {
-                // Avoid user enumeration. We first control if the user exists and if the password
-                // is correct. Only then, we control if the user is already logged in. This way,
-                // an attacker can't understand if any user is online, without knowing the password.
-                let result = database.verify_user_password(&username, &password).await;
+                if let Some(reason) = credentials_length_error(&username, &password) {
+                    info!(
+                        "{} tried to log in with invalid credential length: {}",
+                        address, reason
+                    );
 
-                match result {
-                    Ok(()) => {
-                        // .insert() returns true if the username has been successfully added
-                        // inside the hashmap. Furthermore, is atomic. This means that we don't
-                        // need to lock on it to perform a .contains() and then an .insert() if the
-                        // first was false. If this split operation wasn't locked, it would lead to
-                        // race conditions and security vulnerabilities (a user would have been able
-                        // to log twice).
-                        if logged_users.insert(username.clone()) {
-                            started_session = Some(Session::bundle(address, username));
-                            Response::Ok
-                        } else {
-                            info!(
-                                "{} attempted to login with username {:?} and password {:?}.",
-                                address, username, password
-                            );
-                            Response::LoginFailed(LoginError::AlreadyLoggedIn)
+                    Response::LoginFailed(LoginError::InvalidCredentials)
+                } else {
+                    let result = database.verify_user_password(&username, &password).await;
+
+                    match result {
+                        Ok(()) => {
+                            if logged_users.insert(username.clone()) {
+                                started_session = Some(Session::bundle(address, username));
+                                Response::Ok
+                            } else {
+                                info!(
+                                    "{} attempted to login with username {:?} and password {:?}.",
+                                    address, username, password
+                                );
+                                Response::LoginFailed(LoginError::AlreadyLoggedIn)
+                            }
                         }
-                    }
 
-                    Err(AuthenticationError::UserNotFound(_)) => {
-                        info!("{} tried to log in with a non-existent username.", &address);
-                        Response::LoginFailed(LoginError::InvalidCredentials)
-                    }
+                        Err(AuthenticationError::UserNotFound(_)) => {
+                            info!("{} tried to log in with a non-existent username.", &address);
+                            Response::LoginFailed(LoginError::InvalidCredentials)
+                        }
 
-                    Err(AuthenticationError::InvalidPassword) => {
-                        info!(
-                            "{} tried to log in with username {:?}, but inserted the wrong \
-                             password {:?}.",
-                            &address, username, password
-                        );
-                        Response::LoginFailed(LoginError::InvalidCredentials)
-                    }
+                        Err(AuthenticationError::InvalidPassword) => {
+                            info!(
+                                "{} tried to log in with username {:?}, but inserted the wrong password {:?}.",
+                                &address, username, password
+                            );
+                            Response::LoginFailed(LoginError::InvalidCredentials)
+                        }
 
-                    Err(AuthenticationError::InternalDataBase(e)) => {
-                        // This is an assertion error. An internal problem of the database is out
-                        // of the connection handler's responsibility, so we move it to the caller.
-                        return Err(HandlerError::Domain {
-                            username: None, // The user is not logged in yet
-                            source: InternalError::Database(e),
-                        });
+                        Err(AuthenticationError::InternalDataBase(e)) => {
+                            return Err(HandlerError::Domain {
+                                username: None,
+                                source: InternalError::Database(e),
+                            });
+                        }
                     }
                 }
             }
 
             Request::SignUp(username, password) => {
-                let result = database
-                    .try_register_user(&username, password, address.ip())
-                    .await;
+                if let Some(reason) = credentials_length_error(&username, &password) {
+                    info!(
+                        "{} tried to sign up with invalid credential length: {}",
+                        address, reason
+                    );
 
-                match result {
-                    Ok(()) => {
-                        info!("New user registered: {}.", username);
-                        Response::Ok
-                    }
+                    Response::OperationError(reason)
+                } else {
+                    let result = database
+                        .try_register_user(&username, password, address.ip())
+                        .await;
 
-                    Err(RegistrationError::InternalDataBase(e)) => {
-                        return Err(HandlerError::Domain {
-                            username: None, // The user is not logged in yet, so we use None.
-                            source: InternalError::Database(e),
-                        });
-                    }
+                    match result {
+                        Ok(()) => {
+                            info!("New user registered: {}.", username);
+                            Response::Ok
+                        }
 
-                    Err(RegistrationError::UserAlreadyExists(already_existing_username)) => {
-                        info!(
-                            "{} tried to sign in as {}, but the username was already taken.",
-                            address, already_existing_username
-                        );
-                        Response::SignInFailed(SignInError::UsernameAlreadyTaken)
+                        Err(RegistrationError::InternalDataBase(e)) => {
+                            return Err(HandlerError::Domain {
+                                username: None,
+                                source: InternalError::Database(e),
+                            });
+                        }
+
+                        Err(RegistrationError::UserAlreadyExists(already_existing_username)) => {
+                            info!(
+                                "{} tried to sign in as {}, but the username was already taken.",
+                                address, already_existing_username
+                            );
+                            Response::SignInFailed(SignInError::UsernameAlreadyTaken)
+                        }
                     }
                 }
             }

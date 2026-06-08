@@ -267,6 +267,17 @@ pub enum SignInError {
     AlreadyLoggedIn,
 }
 
+pub const MAX_USERNAME_LEN: usize = 32;
+pub const MAX_PASSWORD_LEN: usize = 32;
+
+pub fn is_username_length_valid(username: &str) -> bool {
+    username.len() <= MAX_USERNAME_LEN
+}
+
+pub fn is_password_length_valid(password: &str) -> bool {
+    password.len() <= MAX_PASSWORD_LEN
+}
+
 /// Requests sent by the client.
 #[derive(Debug, SchemaWrite, SchemaRead)]
 pub enum Request {

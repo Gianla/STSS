@@ -6,7 +6,8 @@ use client_core::file_hasher::hash_file;
 use indicatif::ProgressBar;
 use inquire::{CustomType, Password, Select, Text};
 use shared_library::server_protocol::{
-    Response, RsaSignature, Sha256Hash, Timestamp, verify_timestamp_signature,
+    MAX_PASSWORD_LEN, MAX_USERNAME_LEN, Response, RsaSignature, Sha256Hash, Timestamp,
+    is_password_length_valid, is_username_length_valid, verify_timestamp_signature,
 };
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -50,6 +51,24 @@ fn timestamp_format(ts: Timestamp) -> String {
     }
 }
 
+fn validate_credentials_length(username: &str, password: &str) -> bool {
+    if !is_username_length_valid(username) {
+        eprintln!(
+            "[-] Username is too long. Maximum allowed length is {} characters.",
+            MAX_USERNAME_LEN
+        );
+        return false;
+    }
+    if !is_password_length_valid(password) {
+        eprintln!(
+            "[-] Password is too long. Maximum allowed length is {} characters.",
+            MAX_PASSWORD_LEN
+        );
+        return false;
+    }
+    true
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), anyhow::Error> {
     let args = Args::parse();
@@ -91,6 +110,10 @@ async fn main() -> Result<(), anyhow::Error> {
                 let pass = Password::new("Password:").without_confirmation().prompt();
 
                 if let (Ok(u), Ok(p)) = (user, pass) {
+                    if !validate_credentials_length(&u, &p) {
+                        continue;
+                    }
+
                     match client.login(&u, &p).await {
                         Ok(Response::Ok) => {
                             println!("[+] Login successful!");
@@ -111,6 +134,10 @@ async fn main() -> Result<(), anyhow::Error> {
                 let pass = Password::new("Password:").without_confirmation().prompt();
 
                 if let (Ok(u), Ok(p)) = (user, pass) {
+                    if !validate_credentials_length(&u, &p) {
+                        continue;
+                    }
+
                     match client.signup(&u, &p).await {
                         Ok(Response::Ok) => println!("[+] Signup complete! (You can now log in)"),
                         Ok(Response::SignInFailed(e)) => eprintln!("[-] Signup error: {}", e),
