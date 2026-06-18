@@ -1,10 +1,10 @@
 #![forbid(unsafe_code)]
 
 use anyhow::{Context, Result};
-use clap::{ArgGroup, Parser};
+use clap::{ArgGroup, Parser, Subcommand};
 use rcgen::DnValue;
 use server::config::Config;
-use server::rekey::RekeyClient;
+use server::rekey::RekeyClientManager;
 use server::server::STSServer;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
@@ -22,28 +22,36 @@ use std::path::PathBuf;
         .args(["config", "rekey"])
 ))]
 struct Cli {
+    #[command(subcommand)]
+    pub mode: Mode,
+}
+
+#[derive(Subcommand, Debug)]
+enum Mode {
     /// Starts the server with a configuration file.
-    #[arg(long)]
-    config: Option<PathBuf>,
+    Config {
+        /// The path to the configuration file
+        #[arg(long)]
+        file: PathBuf,
+    },
 
     /// Starts the server in rekey mode.
-    #[arg(long)]
-    rekey: bool,
+    Rekey {
+        #[arg(long)]
+        address: SocketAddr,
 
-    #[arg(long, requires = "rekey")]
-    address: Option<SocketAddr>,
+        #[arg(long)]
+        server_ip: IpAddr,
 
-    #[arg(long, requires = "rekey")]
-    ca_name: Option<String>,
+        #[arg(long, value_parser = parse_dn_value)]
+        organization_name: DnValue,
 
-    #[arg(long, requires = "rekey")]
-    server_ip: Option<IpAddr>,
+        #[arg(long, value_parser = parse_dn_value)]
+        server_name: DnValue,
 
-    #[arg(long, value_parser = parse_dn_value, requires = "rekey")]
-    organization_name: Option<DnValue>,
-
-    #[arg(long, value_parser = parse_dn_value, requires = "rekey")]
-    server_name: Option<DnValue>,
+        #[arg(long)]
+        output: PathBuf,
+    },
 }
 
 fn parse_dn_value(s: &str) -> Result<DnValue, String> {
@@ -57,49 +65,42 @@ fn parse_dn_value(s: &str) -> Result<DnValue, String> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    if let Some(toml_file) = cli.config {
-        let config = Config::from_file(&toml_file)
-            .context("Error while obtaining the configurations from the file")?;
+    match cli.mode {
+        Mode::Config { file } => {
+            let config = Config::from_file(&file)
+                .context("Error while obtaining the configurations from the file")?;
 
-        let server_context = config
-            .to_server_context()
-            .context("Error while parsing the configuration file")?;
+            let server_context = config
+                .to_server_context()
+                .context("Error while parsing the configuration file")?;
 
-        let server = STSServer::build_from_context(server_context)
-            .context("Error while creating the server")?;
+            let server = STSServer::build_from_context(server_context)
+                .context("Error while creating the server")?;
 
-        server
-            .run()
-            .context("Running the server resulted into an error")?;
-    } else if cli.rekey {
-        let address = cli.address.expect("missing CA address");
-        let ca_name = cli.ca_name.expect("missing CA name");
-        let server_ip = cli.server_ip.expect("missing server IP");
-        let organization_name = cli.organization_name.expect("missing organization name");
-        let server_name = cli.server_name.expect("missing server name");
-
-        let output = PathBuf::from("new_server_tls_certificate.pem");
-
-        let runtime = tokio::runtime::Runtime::new()
-            .context("Error while creating Tokio runtime for rekey mode")?;
-
-        runtime.block_on(async move {
-            let client = RekeyClient::new(
+            server
+                .run()
+                .context("Running the server resulted into an error")?;
+        }
+        Mode::Rekey {
+            address,
+            server_ip,
+            organization_name,
+            server_name,
+            output,
+        } => {
+            let manager = RekeyClientManager::build(
                 server_ip,
                 organization_name,
                 server_name,
-                ca_name,
                 output,
                 address,
             )
-            .await
-            .context("Error while connecting to the Certification Authority")?;
+            .context("Failed to start the rekey manager")?;
 
-            client
-                .new_cert_sign_request()
-                .await
-                .context("Error while requesting a signed certificate from the CA")
-        })?;
+            manager
+                .rekey()
+                .context("Failed to perform rekey operation")?;
+        }
     }
 
     Ok(())

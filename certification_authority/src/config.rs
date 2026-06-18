@@ -1,3 +1,4 @@
+use rustls_pki_types::pem::Error::SectionTooLarge;
 use serde::{Deserialize, Serialize};
 use shared_library::safe_read::{safe_read, SafeReadError};
 use std::net::{IpAddr, SocketAddr};
@@ -20,10 +21,28 @@ pub struct NetworkConfig {
     port: u16,
 }
 
+impl NetworkConfig {
+    pub fn new(ip: String, port: u16) -> Self {
+        Self { ip, port }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyConfig {
     ca_cert_path: PathBuf,
     ca_key_path: PathBuf,
+}
+
+impl KeyConfig {
+    pub fn new(ca_cert: impl Into<PathBuf>, ca_key: impl Into<PathBuf>) -> Self {
+        let ca_cert_path = ca_cert.into();
+        let ca_key_path = ca_key.into();
+
+        Self {
+            ca_cert_path,
+            ca_key_path,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +77,10 @@ pub enum ContextConversionError {
 }
 
 impl Config {
+    pub fn new(network: NetworkConfig, keys: KeyConfig) -> Self {
+        Self { network, keys }
+    }
+
     pub fn from_file(path: impl Into<PathBuf>) -> Result<Self, ConfigError> {
         let raw_toml = String::from_utf8(safe_read(path, TOML_EXT)?)
             .map_err(|e| ConfigError::TomlNotUtf8(e.to_string()))?;
@@ -65,7 +88,7 @@ impl Config {
         toml::from_str(&raw_toml).map_err(|e| ConfigError::Parse(e.to_string()))
     }
 
-    pub fn to_context(self) -> Result<CaContext, ContextConversionError> {
+    pub fn convert_to_context(self) -> Result<CaContext, ContextConversionError> {
         let ip = self
             .network
             .ip

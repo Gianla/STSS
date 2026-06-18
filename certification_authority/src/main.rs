@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-pub mod config;
+mod config;
 mod small_server;
 
 use anyhow::{Context, Result};
@@ -31,15 +31,15 @@ async fn main() -> Result<()> {
 
     info!(
         config_path = %cli.config.display(),
-        "starting STSS Certification Authority"
+        "Starting STSS Certification Authority"
     );
 
     let config =
-        Config::from_file(cli.config).context("failed to read the CA configuration file")?;
+        Config::from_file(cli.config).context("Failed to read the CA configuration file")?;
 
     let context = config
-        .to_context()
-        .context("failed to build the CA runtime context")?;
+        .convert_to_context()
+        .context("Failed to build the CA runtime context")?;
 
     SmallServer::build(context)
         .run()

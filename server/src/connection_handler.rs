@@ -351,10 +351,6 @@ where
 
         let mut started_session = None;
 
-        // Avoid user enumeration. We first control if the user exists and if the password
-        // is correct. Only then, we control if the user is already logged in. This way,
-        // an attacker can't understand if any user is online, without knowing the password.
-
         let response: Response = match request {
             Request::Login(username, password) => {
                 if let Some(reason) = credentials_length_error(&username, &password) {
@@ -369,8 +365,14 @@ where
 
                     match result {
                         Ok(()) => {
+                            // Avoid user enumeration. We first control if the user exists and if
+                            // the password is correct. Only then, we control if the user is already
+                            // logged in. This way, an attacker can't understand if any user is
+                            // online, without knowing the password.
+
                             if logged_users.insert(username.clone()) {
                                 started_session = Some(Session::bundle(address, username));
+                                // No logs since this is later logged.
                                 Response::Ok
                             } else {
                                 info!(

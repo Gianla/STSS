@@ -52,7 +52,7 @@ pub enum SignRequestError {
     UnexpectedResponse,
 }
 
-pub struct RekeyClient {
+struct RekeyClient {
     server_ip: IpAddr,
     organization_name: DnValue,
     server_name: DnValue,
@@ -65,7 +65,6 @@ impl RekeyClient {
         server_ip: IpAddr,
         organization_name: DnValue,
         server_name: DnValue,
-        _ca_name: String,
         output: impl Into<PathBuf>,
         address: SocketAddr,
     ) -> Result<Self, RekeyClientError> {
@@ -136,5 +135,61 @@ impl RekeyClient {
         } else {
             Err(SignRequestError::ConnectionClosed)
         }
+    }
+}
+
+#[derive(Error, Debug)]
+pub enum RekeyClientManagerError {
+    #[error(transparent)]
+    RekeyClient(#[from] RekeyClientError),
+
+    #[error(transparent)]
+    SignRequest(#[from] SignRequestError),
+}
+
+pub struct RekeyClientManager {
+    server_ip: IpAddr,
+    organization_name: DnValue,
+    server_name: DnValue,
+    output: PathBuf,
+    address: SocketAddr,
+    runtime: tokio::runtime::Runtime,
+}
+
+impl RekeyClientManager {
+    pub fn build(
+        server_ip: IpAddr,
+        organization_name: DnValue,
+        server_name: DnValue,
+        output: impl Into<PathBuf>,
+        address: SocketAddr,
+    ) -> Result<Self, io::Error> {
+        let runtime = tokio::runtime::Runtime::new()?;
+
+        Ok(Self {
+            server_ip,
+            organization_name,
+            server_name,
+            output: output.into(),
+            address,
+            runtime,
+        })
+    }
+
+    pub fn rekey(self) -> Result<(), RekeyClientManagerError> {
+        self.runtime.block_on(async move {
+            let instance = RekeyClient::new(
+                self.server_ip,
+                self.organization_name,
+                self.server_name,
+                self.output,
+                self.address,
+            )
+            .await?;
+
+            instance.new_cert_sign_request().await?;
+
+            Ok(())
+        })
     }
 }

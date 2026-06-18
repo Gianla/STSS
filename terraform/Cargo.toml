@@ -13,6 +13,7 @@ const_format = "0.2.36"
 rand = "0.10.1"
 toml = "1.1.2"
 clap = { version = "4.6.1", features = ["derive"] }
+certification_authority = { path = "../certification_authority" }
 
 # for testing
 [dev-dependencies]

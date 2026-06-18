@@ -1,6 +1,9 @@
 //! Useful to set up a simulated environment where client, server and CA can communicate between
 //! each other.
 
+use certification_authority::config::{
+    Config as CaConfig, KeyConfig as CaKeyConfig, NetworkConfig as CaNetworkConfig,
+};
 use client_cli::config::Config as ClientConfig;
 use const_format::concatcp;
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, PKCS_ED25519};
@@ -108,6 +111,7 @@ pub const DEFAULT_CLIENT_ENV_SUBDIR: &str = "client_env";
 pub const DEFAULT_SERVER_ENV_SUBDIR: &str = "server_env";
 pub const DEFAULT_CA_ENV_SUBDIR: &str = "ca_env";
 pub const DEFAULT_SERVER_IP_STR: &str = "127.0.0.1";
+pub const DEFAULT_CA_IP_STR: &str = "127.0.0.1";
 pub const DEFAULT_SERVER_IP_PORT: u16 = 8080;
 pub const DEFAULT_CA_IP_PORT: u16 = 8081;
 
@@ -729,18 +733,25 @@ impl Generator {
     fn generate_ca_toml(&self) -> Result<(), TomlGenError> {
         let ca_cert_path =
             self.get_canonical_path(self.env.ca_dir(), self.ca_files.tls_cert_name.as_str())?;
+
         let ca_key_path =
             self.get_canonical_path(self.env.ca_dir(), self.ca_files.tls_key_name.as_str())?;
 
-        let toml_default = format!(
-            "[network]\nip = \"{}\"\nport = {}\n\n[keys]\nca_cert_path = \"{}\"\nca_key_path = \"{}\"\n",
-            DEFAULT_SERVER_IP_STR,
-            DEFAULT_CA_IP_PORT,
-            ca_cert_path.display(),
-            ca_key_path.display(),
+        let final_path = self.env.ca_dir.join(&self.ca_files.toml_name);
+
+        let default = CaConfig::new(
+            CaNetworkConfig::new(
+                DEFAULT_CA_IP_STR.parse().expect(concatcp!(
+                    "converting the CA's ip has failed but shouldn't since {} is hardcoded",
+                    DEFAULT_CA_IP_STR
+                )),
+                DEFAULT_CA_IP_PORT,
+            ),
+            CaKeyConfig::new(ca_cert_path, ca_key_path),
         );
 
-        let final_path = self.env.ca_dir.join(&self.ca_files.toml_name);
+        let toml_default = toml::to_string_pretty(&default)
+            .map_err(|e| TomlGenError::TomlGeneration(e.to_string()))?;
 
         fs::write(&final_path, toml_default)
             .map_err(|e| TomlGenError::Io(final_path.to_string_lossy().to_string(), e))
